@@ -14,6 +14,7 @@ import type {
   Profile,
   ProfileState,
   PlaygroundModelType,
+  HardwareSnapshot,
 } from "../lib/types";
 import { connectionState } from "./theme";
 
@@ -264,6 +265,9 @@ interface ModelListRecord {
       aliases?: string[];
       modelID?: string;
       peerID?: string;
+      strategy?: string;
+      targets?: string[];
+      spillover?: number;
     };
   };
 }
@@ -306,6 +310,9 @@ async function loadPlaygroundModels(request: number): Promise<Model[]> {
           playgroundType,
           aliases: [...(aliasesByModel.get(record.id) ?? [])],
           capabilities: record.capabilities,
+          strategy: metadata?.strategy,
+          targets: metadata?.targets ?? [],
+          spillover: metadata?.spillover,
         };
       });
     newModels.sort((a, b) => {
@@ -474,4 +481,12 @@ export async function fetchPerformance(after?: string): Promise<PerformanceRespo
     console.error("Failed to fetch performance data:", error);
     return null;
   }
+}
+
+export async function getHardware(): Promise<HardwareSnapshot> {
+  const response = await fetch("/api/hardware");
+  if (!response.ok) {
+    throw new Error(`Failed to fetch hardware: ${response.status}`);
+  }
+  return await response.json() as HardwareSnapshot;
 }

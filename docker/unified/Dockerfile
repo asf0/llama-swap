@@ -139,6 +139,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 libvulkan1 mesa-vulkan-drivers \
+    rocm-smi \
     python3 curl ca-certificates \
     libavcodec60 libavformat60 libavutil58 libswresample4 \
     && rm -rf /var/lib/apt/lists/*
@@ -211,4 +212,4 @@ RUN mkdir -p /models && chown ${RUN_UID}:${RUN_UID} /models
 WORKDIR /models
 USER ${RUN_UID}
 ENTRYPOINT ["llama-swap"]
-CMD ["-config", "/etc/llama-swap/config/config.yaml", "-listen", "0.0.0.0:8080"]
+CMD ["-config", "/etc/llama-swap/config/config.yaml", "-listen", "0.0.0.0:8080", "-watch-config"]
