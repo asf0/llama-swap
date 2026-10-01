@@ -13,7 +13,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
 	"github.com/mostlygeek/llama-swap/internal/router/scheduler"
-	"github.com/mostlygeek/llama-swap/internal/shared"
+	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 type shutdownReq struct {
@@ -365,9 +365,19 @@ func (b *baseRouter) ProcessLogger(modelID string) (*logmon.Monitor, bool) {
 // is a snapshot, so this is safe to call without the run loop.
 func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 	running := make(map[string]process.ProcessState)
+	for id, st := range b.RunningStatus() {
+		running[id] = st.State
+	}
+	return running
+}
+
+// RunningStatus returns the status snapshot of every process that is not
+// stopped or shut down.
+func (b *baseRouter) RunningStatus() map[string]process.Status {
+	running := make(map[string]process.Status)
 	for id, p := range b.processes {
-		st := p.State()
-		if st == process.StateStopped || st == process.StateShutdown {
+		st := p.Status()
+		if st.State == process.StateStopped || st.State == process.StateShutdown {
 			continue
 		}
 		running[id] = st
@@ -454,13 +464,33 @@ func (b *baseRouter) Shutdown(timeout time.Duration) error {
 
 func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if b.shuttingDown.Load() {
-		shared.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
+		swaputil.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
 		return
 	}
 
-	data, err := shared.FetchContext(req, b.config)
+	data, err := swaputil.FetchContext(req, b.config)
 	if err != nil {
-		shared.SendError(w, req, err)
+		swaputil.SendError(w, req, err)
+		return
+	}
+
+	// Ignored websocket connections are deliberately kept outside the
+	// scheduler: they cannot start or queue a model, consume concurrency, or
+	// prevent another request from swapping the process out. A process may stop
+	// immediately after this readiness check; dropping that websocket is the
+	// intended tradeoff of opting out of lifecycle tracking.
+	if swaputil.ShouldIgnoreWebsocket(req, b.config) {
+		p, ok := b.processes[data.ModelID]
+		if !ok {
+			swaputil.SendError(w, req, scheduler.ErrModelNotFound)
+			return
+		}
+		if p.State() != process.StateReady {
+			swaputil.SendResponse(w, req, http.StatusConflict,
+				fmt.Sprintf("model %s is not loaded; ignored websocket requests cannot start it", data.ModelID))
+			return
+		}
+		p.ServeHTTP(w, req)
 		return
 	}
 
@@ -480,7 +510,7 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case <-req.Context().Done():
 		return
 	case <-b.shutdownCtx.Done():
-		shared.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
+		swaputil.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
 		return
 	}
 
@@ -494,11 +524,11 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	case <-b.shutdownCtx.Done():
-		shared.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
+		swaputil.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
 		return
 	}
 	if admissionErr != nil {
-		shared.SendError(w, req, admissionErr)
+		swaputil.SendError(w, req, admissionErr)
 		return
 	}
 
@@ -532,20 +562,40 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// reclaims it. release() must run even when waitForCompletion times out:
 	// otherwise a still-streaming goroutine flushes a finalized response and
 	// panics on the recycled *bufio.Writer.
-	finishLoading := func() {
+	//
+	// A non-nil streamErr is framed into the stream first, while writes still
+	// reach the client: the 200 is already committed, so this is the only way
+	// the error can be reported at all.
+	finishLoading := func(streamErr error) {
 		cancelLoad()
 		if lw != nil {
 			lw.waitForCompletion(1 * time.Second)
+			if streamErr != nil {
+				lw.sendError(streamErr)
+			}
 			lw.release()
+		}
+	}
+
+	// reportError sends err as a normal error response, for the paths where no
+	// loading stream was live to carry it in-band. When one was, finishLoading
+	// has already framed it into the stream and a second report would append a
+	// bare JSON line that SSE parsers discard.
+	reportError := func(err error) {
+		if lw == nil {
+			swaputil.SendError(w, req, err)
 		}
 	}
 
 	var resp scheduler.HandlerResp
 	select {
 	case resp = <-hr.Respond:
-		finishLoading()
+		// Pass the dispatch error in so it is framed into the stream before
+		// release fences the writer; a nil error just ends the stream.
+		finishLoading(resp.Err)
 	case <-req.Context().Done():
-		finishLoading()
+		// The client is gone, so there is nobody to report to.
+		finishLoading(nil)
 		// Notify the scheduler so it can prune this request from its queue
 		// and swap waiters. Without this, a queued request whose client left
 		// would sit in the scheduler until drainQueue eventually starts a
@@ -556,13 +606,14 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	case <-b.shutdownCtx.Done():
-		finishLoading()
-		shared.SendError(w, req, fmt.Errorf("%s is shutting down", b.name))
+		shutdownErr := fmt.Errorf("%s is shutting down", b.name)
+		finishLoading(shutdownErr)
+		reportError(shutdownErr)
 		return
 	}
 
 	if resp.Err != nil {
-		shared.SendError(w, req, resp.Err)
+		reportError(resp.Err)
 		return
 	}
 	resp.HandleFunc(w, req)

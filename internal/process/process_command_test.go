@@ -174,8 +174,8 @@ func TestProcessCommand_StartStop(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("before start: expected 503, got %d", rr.Code)
 	}
-	if body := rr.Body.String(); !strings.Contains(body, "llama-swap-error") {
-		t.Errorf("before start: expected body to contain %q, got %q", "llama-swap-error", body)
+	if body := rr.Body.String(); !strings.Contains(body, `"src":"llama-swap"`) || !strings.Contains(body, "process is not ready") {
+		t.Errorf("before start: expected llama-swap error envelope, got %q", body)
 	}
 
 	runErr := runAsync(t, p)
@@ -213,8 +213,8 @@ func TestProcessCommand_StartStop(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("after stop: expected 503, got %d", rr.Code)
 	}
-	if body := rr.Body.String(); !strings.Contains(body, "llama-swap-error") {
-		t.Errorf("after stop: expected body to contain %q, got %q", "llama-swap-error", body)
+	if body := rr.Body.String(); !strings.Contains(body, `"src":"llama-swap"`) || !strings.Contains(body, "process is not ready") {
+		t.Errorf("after stop: expected llama-swap error envelope, got %q", body)
 	}
 }
 
@@ -420,6 +420,69 @@ func TestProcessCommand_RunStopCycle(t *testing.T) {
 		case <-runErr:
 		case <-time.After(testReturnTimeout):
 			t.Fatalf("cycle %d: Run() did not return after Stop", i)
+		}
+	}
+}
+
+// TestProcessCommand_StripsUpstreamCORSHeaders is the model-proxy half of the
+// issue #85 regression. llama-server sets its own Access-Control-Allow-Origin
+// on every response, and httputil.ReverseProxy adds upstream headers rather
+// than replacing them, so llama-swap's CORS middleware and the upstream would
+// both contribute a value. Clients that fold repeated headers then see the
+// illegal "*, " and drop the request. The proxy must forward none of them.
+func TestProcessCommand_StripsUpstreamCORSHeaders(t *testing.T) {
+	skipIfNoSimpleResponder(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Mimic llama-server: echo whatever Origin arrived, so the header is
+		// present-but-empty when the client sent none.
+		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	cmd, _ := simpleResponderCmd(t, "-silent")
+	p, err := New(context.Background(), t.Name(), config.ModelConfig{
+		Cmd:                cmd,
+		Proxy:              upstream.URL,
+		CheckEndpoint:      "/health",
+		HealthCheckTimeout: 10,
+	}, logmon.NewWriter(io.Discard), logmon.NewWriter(io.Discard))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { p.Stop(testStopTimeout) })
+
+	_ = runAsync(t, p)
+
+	for _, origin := range []string{"", "http://example.com"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("Origin=%q: status=%d want 200", origin, w.Code)
+		}
+		for name := range w.Header() {
+			if strings.HasPrefix(http.CanonicalHeaderKey(name), "Access-Control-") {
+				t.Errorf("Origin=%q: upstream %s=%q was copied through; it must be stripped",
+					origin, name, w.Header().Values(name))
+			}
+		}
+		if got := w.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("Origin=%q: Content-Type=%q, unrelated headers must be untouched", origin, got)
 		}
 	}
 }
@@ -644,6 +707,71 @@ func TestProcessCommand_TTL_ResetsOnRequest(t *testing.T) {
 	case <-runErr:
 	case <-time.After(testReturnTimeout):
 		t.Fatal("Run() did not return after Stop")
+	}
+}
+
+func TestProcessCommand_TTL_IgnoresWebsocket(t *testing.T) {
+	skipIfNoSimpleResponder(t)
+
+	websocketStarted := make(chan struct{})
+	releaseWebsocket := make(chan struct{})
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		close(websocketStarted)
+		<-releaseWebsocket
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(mock.Close)
+
+	cmd, _ := simpleResponderCmd(t, "-silent")
+	p := newProcessCommand(t, config.ModelConfig{
+		Cmd:                cmd,
+		Proxy:              mock.URL,
+		CheckEndpoint:      "/health",
+		HealthCheckTimeout: 10,
+		UnloadAfter:        1,
+		UnloadTimeout:      1,
+		Compat:             config.CompatConfig{IgnoreWebsockets: true},
+	})
+	runErr := runAsync(t, p)
+
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		r := httptest.NewRequest(http.MethodGet, "/socket", nil)
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		p.ServeHTTP(httptest.NewRecorder(), r)
+	}()
+
+	select {
+	case <-websocketStarted:
+	case <-time.After(testReturnTimeout):
+		t.Fatal("websocket request did not reach upstream")
+	}
+	waitForState(t, p, StateStopped)
+	select {
+	case <-requestDone:
+		t.Fatal("websocket request completed before it was released")
+	default:
+	}
+
+	close(releaseWebsocket)
+	select {
+	case <-requestDone:
+	case <-time.After(testReturnTimeout):
+		t.Fatal("websocket request did not finish after release")
+	}
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run() after TTL stop: %v", err)
+		}
+	case <-time.After(testReturnTimeout):
+		t.Fatal("Run() did not return after TTL stop")
 	}
 }
 

@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
 	"github.com/mostlygeek/llama-swap/internal/router/scheduler"
+	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 // These tests cover baseRouter's own machinery — the run loop, process
@@ -81,6 +84,35 @@ func TestBaseRouter_RunningModels(t *testing.T) {
 	}
 	if _, ok := running["stopped"]; ok {
 		t.Errorf("stopped process should be excluded from RunningModels")
+	}
+}
+
+func TestBaseRouter_RunningStatus(t *testing.T) {
+	ready := newFakeProcess("ready")
+	before := time.Now()
+	ready.markReady()
+	starting := newFakeProcess("starting")
+	starting.setState(process.StateStarting)
+	stopped := newFakeProcess("stopped")
+
+	b := newTestBase(t, map[string]process.Process{
+		"ready": ready, "starting": starting, "stopped": stopped,
+	}, &stubPlanner{})
+
+	running := b.RunningStatus()
+	if len(running) != 2 {
+		t.Fatalf("running=%v want 2 entries", running)
+	}
+	if st := running["ready"]; st.State != process.StateReady || st.ReadySince.Before(before) {
+		t.Errorf("ready status=%+v, want ready with ReadySince after %v", st, before)
+	}
+	if st := running["starting"]; st.State != process.StateStarting || !st.ReadySince.IsZero() {
+		t.Errorf("starting status=%+v, want starting with zero ReadySince", st)
+	}
+
+	ready.setState(process.StateStopped)
+	if _, ok := b.RunningStatus()["ready"]; ok {
+		t.Errorf("stopped process should be excluded from RunningStatus")
 	}
 }
 
@@ -345,6 +377,103 @@ func TestBaseRouter_OnDemandStart(t *testing.T) {
 	}
 }
 
+func TestBaseRouter_IgnoreWebsocketsRejectsModelUnlessReady(t *testing.T) {
+	for _, state := range []process.ProcessState{process.StateStopped, process.StateStarting} {
+		t.Run(string(state), func(t *testing.T) {
+			a := newFakeProcess("a")
+			if state != process.StateStopped {
+				a.setState(state)
+			}
+			conf := config.Config{
+				HealthCheckTimeout: 5,
+				Models: map[string]config.ModelConfig{
+					"a": {Compat: config.CompatConfig{IgnoreWebsockets: true}},
+				},
+			}
+			b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
+
+			r := httptest.NewRequest(http.MethodGet, "/props?model=a", nil)
+			r.Header.Set("Connection", "keep-alive, Upgrade")
+			r.Header.Set("Upgrade", "websocket")
+			w := httptest.NewRecorder()
+			b.ServeHTTP(w, r)
+
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status=%d want %d body=%q", w.Code, http.StatusConflict, w.Body.String())
+			}
+			if got := a.runCalls.Load(); got != 0 {
+				t.Errorf("runCalls=%d want 0", got)
+			}
+			if got := a.serveCalls.Load(); got != 0 {
+				t.Errorf("serveCalls=%d want 0", got)
+			}
+		})
+	}
+}
+
+func TestBaseRouter_WebsocketStartsModelWhenCompatDisabled(t *testing.T) {
+	a := newFakeProcess("a")
+	a.autoReady = true
+	conf := config.Config{
+		HealthCheckTimeout: 5,
+		Models:             map[string]config.ModelConfig{"a": {}},
+	}
+	b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
+
+	r := httptest.NewRequest(http.MethodGet, "/props?model=a", nil)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d body=%q", w.Code, http.StatusOK, w.Body.String())
+	}
+	if got := a.runCalls.Load(); got != 1 {
+		t.Errorf("runCalls=%d want 1", got)
+	}
+}
+
+func TestBaseRouter_IgnoreWebsocketsDoesNotBlockSwap(t *testing.T) {
+	a := newFakeProcess("a")
+	a.markReady()
+	a.serveBlock = make(chan struct{})
+	pb := newFakeProcess("b")
+	pb.autoReady = true
+	conf := config.Config{
+		HealthCheckTimeout: 5,
+		Models: map[string]config.ModelConfig{
+			"a": {Compat: config.CompatConfig{IgnoreWebsockets: true}},
+			"b": {},
+		},
+	}
+	b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a, "b": pb}, &stubPlanner{
+		evict: map[string][]string{"b": {"a"}},
+	})
+
+	websocketDone := make(chan struct{})
+	go func() {
+		defer close(websocketDone)
+		r := httptest.NewRequest(http.MethodGet, "/props?model=a", nil)
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		b.ServeHTTP(httptest.NewRecorder(), r)
+	}()
+	waitSignal(t, a.serveStarted, "websocket request start")
+
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, newRequest("b"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if !a.stoppedWhileServing.Load() {
+		t.Fatal("ignored websocket prevented the conflicting model from swapping in")
+	}
+
+	close(a.serveBlock)
+	waitSignal(t, websocketDone, "websocket request finish")
+}
+
 // TestBaseRouter_RequestDuringStop is the router-level regression test for
 // issue #946. A process being stopped outside the router's knowledge (a TTL
 // unload, a crash, an operator kill) must not wedge the swap machinery: the
@@ -513,10 +642,56 @@ func TestBaseRouter_ConcurrencyLimitRejectsBeforeLoadingStream(t *testing.T) {
 	if strings.Contains(w.Body.String(), "llama-swap loading model") {
 		t.Fatalf("429 body contains loading stream: %q", w.Body.String())
 	}
+	// OpenAI clients read body["error"]["message"], so "error" must decode as
+	// an object rather than a bare string.
+	var envelope swaputil.ErrorEnvelope
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("429 body is not an OpenAI error envelope: %v, body=%q", err, w.Body.String())
+	}
+	if envelope.Error.Message == "" || envelope.Error.Type != swaputil.ErrorTypeRateLimit {
+		t.Fatalf("429 error=%+v, want a rate_limit_error with a message", envelope.Error)
+	}
 
 	close(bProc.serveBlock)
 	for name, ch := range map[string]chan struct{}{"b": bDone, "a1": aDone1, "a2": aDone2} {
 		waitSignal(t, ch, name+" request finish")
+	}
+}
+
+// TestBaseRouter_DispatchErrorFramedIntoLoadingStream covers the second half of
+// #1029. Once the loading stream has committed its 200, an error can only reach
+// the client in-band: swaputil.SendError's status is dropped and its JSON body
+// lands as a bare line that every SSE parser discards, leaving the caller with
+// a truncated stream, no [DONE], and no reason.
+func TestBaseRouter_DispatchErrorFramedIntoLoadingStream(t *testing.T) {
+	sendLoading := true
+	conf := config.Config{
+		HealthCheckTimeout: 5,
+		Models:             map[string]config.ModelConfig{"a": {SendLoadingState: &sendLoading}},
+	}
+	a := newFakeProcess("a")
+	a.ensureErr = fmt.Errorf("upstream command exited prematurely")
+
+	b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
+
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, newStreamRequest("a"))
+
+	body := w.Body.String()
+	// The loading text is streamed a few characters per frame, so reassemble it.
+	if content := extractStreamedContent(body); !strings.Contains(content, "llama-swap loading model") {
+		t.Fatalf("loading stream did not start, so this is not the path under test: %q", content)
+	}
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if line != "" && !strings.HasPrefix(line, "data: ") {
+			t.Errorf("line %q is not an SSE field; a client would silently ignore it", line)
+		}
+	}
+	if !strings.Contains(body, "upstream command exited prematurely") {
+		t.Errorf("dispatch error never reached the client: %q", body)
+	}
+	if !strings.HasSuffix(strings.TrimRight(body, "\n"), "data: [DONE]") {
+		t.Errorf("stream not terminated with [DONE]: %q", body)
 	}
 }
 

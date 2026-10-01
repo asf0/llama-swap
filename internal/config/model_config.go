@@ -9,28 +9,69 @@ import (
 const (
 	MODEL_CONFIG_DEFAULT_TTL   = -1
 	MODEL_CONFIG_DEFAULT_PROXY = "http://localhost:${PORT}"
+	comfyUIConcurrencyLimit    = 999
+
+	// ComfyUIModelID identifies the model used by the /comfyui endpoint.
+	ComfyUIModelID = "comfyui_auto"
 )
 
 var validModalities = map[string]struct{}{
 	"text":  {},
 	"audio": {},
 	"image": {},
+	"video": {},
 }
 
 // ModelCapConfig defines what modalities and features a model supports.
 // Used in /v1/models to inform clients. An empty block (all zero values) is
 // treated as not configured.
 type ModelCapConfig struct {
-	In       []string `yaml:"in"`
-	Out      []string `yaml:"out"`
-	Tools    bool     `yaml:"tools"`
-	Reranker bool     `yaml:"reranker"`
-	Context  int      `yaml:"context"`
+	In       []string `yaml:"in" json:"in,omitempty"`
+	Out      []string `yaml:"out" json:"out,omitempty"`
+	Tools    bool     `yaml:"tools" json:"tools,omitempty"`
+	Reranker bool     `yaml:"reranker" json:"reranker,omitempty"`
+	Context  int      `yaml:"context" json:"context,omitempty"`
+
+	// DisableAuto turns off automatic capability discovery for this model.
+	// It is a switch, not a capability, so Empty ignores it and it is never
+	// rendered into /v1/models.
+	DisableAuto bool `yaml:"disableAuto" json:"-"`
 }
 
-// Empty returns true when all fields are at their zero values.
+// Empty returns true when all capability fields are at their zero values.
+// DisableAuto is deliberately excluded: a block that only turns discovery off
+// still advertises nothing, so it must render as if it were absent.
 func (c ModelCapConfig) Empty() bool {
 	return len(c.In) == 0 && len(c.Out) == 0 && !c.Tools && !c.Reranker && c.Context == 0
+}
+
+// Merge returns c with every field left at its zero value filled in from
+// auto. Configured values always win, field by field, so a model that sets
+// only capabilities.tools still picks up a discovered context length.
+//
+// A field explicitly set to its zero value in the config is indistinguishable
+// from an omitted one, so `tools: false` cannot override a discovered true.
+// Use capabilities.disableAuto to suppress discovery for the model instead.
+//
+// DisableAuto is carried over from c unchanged; auto never sets it.
+func (c ModelCapConfig) Merge(auto ModelCapConfig) ModelCapConfig {
+	merged := c
+	if len(merged.In) == 0 {
+		merged.In = auto.In
+	}
+	if len(merged.Out) == 0 {
+		merged.Out = auto.Out
+	}
+	if !merged.Tools {
+		merged.Tools = auto.Tools
+	}
+	if !merged.Reranker {
+		merged.Reranker = auto.Reranker
+	}
+	if merged.Context == 0 {
+		merged.Context = auto.Context
+	}
+	return merged
 }
 
 // Validate checks that all modality values are recognized and context is
@@ -38,12 +79,12 @@ func (c ModelCapConfig) Empty() bool {
 func (c ModelCapConfig) Validate() error {
 	for _, m := range c.In {
 		if _, ok := validModalities[m]; !ok {
-			return fmt.Errorf("capabilities.in: invalid modality %q, must be one of: text, audio, image", m)
+			return fmt.Errorf("capabilities.in: invalid modality %q, must be one of: text, audio, image, video", m)
 		}
 	}
 	for _, m := range c.Out {
 		if _, ok := validModalities[m]; !ok {
-			return fmt.Errorf("capabilities.out: invalid modality %q, must be one of: text, audio, image", m)
+			return fmt.Errorf("capabilities.out: invalid modality %q, must be one of: text, audio, image, video", m)
 		}
 	}
 	if c.Context < 0 {
@@ -61,6 +102,13 @@ type TimeoutsConfig struct {
 	TLSHandshake   int `yaml:"tlsHandshake"`
 	ExpectContinue int `yaml:"expectContinue"`
 	IdleConn       int `yaml:"idleConn"`
+}
+
+// CompatConfig holds compatibility settings for upstream applications.
+type CompatConfig struct {
+	// IgnoreWebsockets prevents websocket connections from participating in
+	// model lifecycle activity such as swapping, concurrency, and TTL tracking.
+	IgnoreWebsockets bool `yaml:"ignoreWebsockets"`
 }
 
 type ModelConfig struct {
@@ -98,6 +146,9 @@ type ModelConfig struct {
 
 	// Timeout settings for proxy connections
 	Timeouts TimeoutsConfig `yaml:"timeouts"`
+
+	// Compatibility settings for upstream applications.
+	Compat CompatConfig `yaml:"compat"`
 
 	// Capabilities defines what modalities and features the model supports.
 	Capabilities ModelCapConfig `yaml:"capabilities"`

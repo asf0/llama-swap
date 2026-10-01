@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -52,18 +51,19 @@ func serveCmd(args []string) {
 		vllmURL     string
 		listenAddr  string
 		sleepLevel  int
-		startCmd    string
 		healthPath  string
 		waitTimeout time.Duration
+		journalUnit string
 	)
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	fs.StringVar(&vllmURL, "vllm-url", "", "Base URL of vLLM server (e.g., http://127.0.0.1:8000)")
 	fs.StringVar(&listenAddr, "listen", "", "Address to listen on (e.g., :$PORT)")
 	fs.IntVar(&sleepLevel, "sleep-level", 1, "Sleep level to use when sleeping (default 1)")
-	fs.StringVar(&startCmd, "start-cmd", "", "Command to start the vLLM daemon if not running (e.g., 'docker run ...')")
 	fs.StringVar(&healthPath, "health-path", "/health", "Health check path (default /health)")
 	fs.DurationVar(&waitTimeout, "wait-timeout", 120*time.Second, "Timeout waiting for daemon to become healthy")
+	fs.StringVar(&journalUnit, "journal-unit", "", "User systemd unit whose logs should be forwarded to stdout")
 	fs.Parse(args)
+	startArgs := fs.Args()
 
 	if vllmURL == "" {
 		log.Fatalf("--vllm-url is required")
@@ -71,12 +71,20 @@ func serveCmd(args []string) {
 	if listenAddr == "" {
 		log.Fatalf("--listen is required")
 	}
-	if startCmd == "" {
-		log.Fatalf("--start-cmd is required")
+	if len(startArgs) == 0 {
+		log.Fatalf("a daemon command after -- is required")
 	}
 
 	// Ensure vLLM URL does not have trailing slash.
 	vllmURL = strings.TrimRight(vllmURL, "/")
+
+	journalCtx, stopJournal := context.WithCancel(context.Background())
+	defer stopJournal()
+	if journalUnit != "" {
+		if err := startJournalForwarder(journalCtx, journalUnit); err != nil {
+			log.Printf("Warning: failed to forward logs from %s: %v", journalUnit, err)
+		}
+	}
 
 	// Step 1: Ensure the daemon is running and awake.
 	// First, check if we can reach the daemon (liveness).
@@ -86,7 +94,7 @@ func serveCmd(args []string) {
 		if err := wakeUpVLLM(vllmURL); err != nil {
 			// Wake up failed (e.g., connection refused), assume daemon not running, try to start it.
 			log.Printf("Wake up failed: %v, attempting to start daemon", err)
-			if err := startDaemon(startCmd, vllmURL, healthPath, waitTimeout); err != nil {
+			if err := startDaemon(startArgs, vllmURL, healthPath, waitTimeout); err != nil {
 				log.Fatalf("Failed to start daemon: %v", err)
 			}
 		} else {
@@ -117,23 +125,9 @@ func serveCmd(args []string) {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(proxyURL)
 
-	// Create a custom transport to set timeouts.
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-	}
-	proxy.Transport = transport
-
-	// Modify response to disable buffering for streaming.
+	// Modify response to disable buffering for streaming. Upstream CORS headers
+	// are deliberately left in place: this wrapper has no CORS middleware of its
+	// own, and llama-swap strips them when it proxies through; see issue #85.
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 			resp.Header.Set("X-Accel-Buffering", "no")
@@ -160,7 +154,18 @@ func serveCmd(args []string) {
 	// Wait for interrupt signal to gracefully shutdown.
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
+	sig := <-c
+	signal.Stop(c)
+
+	if sig == syscall.SIGTERM {
+		log.Printf("SIGTERM received, putting vLLM to sleep (level %d)", sleepLevel)
+		if err := sleepVLLM(vllmURL, sleepLevel); err != nil {
+			log.Printf("Warning: failed to put vLLM to sleep: %v", err)
+		} else {
+			log.Printf("Successfully put vLLM to sleep (level %d)", sleepLevel)
+		}
+	}
+
 	log.Println("Shutting down vllm-wrapper serve...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -175,10 +180,12 @@ func sleepCmd(args []string) {
 	var (
 		vllmURL    string
 		sleepLevel int
+		stopPID    int
 	)
 	fs := flag.NewFlagSet("sleep", flag.ExitOnError)
 	fs.StringVar(&vllmURL, "vllm-url", "", "Base URL of vLLM server (e.g., http://127.0.0.1:8000)")
 	fs.IntVar(&sleepLevel, "sleep-level", 1, "Sleep level to use (default 1)")
+	fs.IntVar(&stopPID, "stop-pid", 0, "PID of the serve proxy to terminate after vLLM successfully enters sleep mode")
 	fs.Parse(args)
 
 	if vllmURL == "" {
@@ -205,6 +212,34 @@ func sleepCmd(args []string) {
 	}
 
 	log.Printf("Successfully put vLLM to sleep (level %d)", sleepLevel)
+
+	if stopPID > 0 {
+		if err := syscall.Kill(stopPID, syscall.SIGTERM); err != nil {
+			log.Fatalf("Failed to stop serve proxy process %d: %v", stopPID, err)
+		}
+		log.Printf("Sent SIGTERM to serve proxy process %d", stopPID)
+	}
+}
+
+// sleepVLLM sends a POST to /sleep to put the vLLM daemon to sleep.
+func sleepVLLM(vllmURL string, sleepLevel int) error {
+	body := map[string]int{"level": sleepLevel}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal sleep request: %w", err)
+	}
+
+	resp, err := http.Post(vllmURL+"/sleep", "application/json", strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return fmt.Errorf("failed to send sleep request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("vLLM sleep request failed with status %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	return nil
 }
 
 // wakeUpVLLM sends a POST to /wake_up to wake the vLLM daemon.
@@ -268,10 +303,37 @@ func checkHealthy(vllmURL string, healthPath string) error {
 	return nil
 }
 
+// startJournalForwarder forwards new log entries from a user systemd unit to stdout.
+func startJournalForwarder(ctx context.Context, unit string) error {
+	cmd := exec.CommandContext(
+		ctx,
+		"journalctl",
+		"--user-unit="+unit,
+		"--follow",
+		"--lines=0",
+		"--output=cat",
+		"--no-pager",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start journalctl for %s: %w", unit, err)
+	}
+
+	go func() {
+		err := cmd.Wait()
+		if ctx.Err() == nil && err != nil {
+			log.Printf("Journal forwarding for %s stopped: %v", unit, err)
+		}
+	}()
+
+	return nil
+}
+
 // startDaemon executes the start command and waits for the vLLM daemon to become healthy.
-func startDaemon(startCmd string, vllmURL string, healthPath string, waitTimeout time.Duration) error {
-	// Start the daemon command.
-	cmd := exec.Command("sh", "-c", startCmd)
+func startDaemon(startArgs []string, vllmURL string, healthPath string, waitTimeout time.Duration) error {
+	cmd := exec.Command(startArgs[0], startArgs[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

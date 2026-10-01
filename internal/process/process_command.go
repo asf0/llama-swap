@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,10 +17,49 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/internal/shared"
+	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 var ErrStartAborted = fmt.Errorf("aborted")
+
+// healthCheckKey marks requests issued by the health check loop, which polls
+// the upstream through the same reverse proxy. Their failures are the expected
+// shape of a model still booting, so they must not be logged as proxy errors.
+type healthCheckKey struct{}
+
+// newProxyErrorHandler builds the ErrorHandler for a model's reverse proxy.
+//
+// httputil.ReverseProxy's default handler answers every failure with 502, so a
+// client hanging up mid-generation is logged as a Bad Gateway and sends
+// operators looking at an inference server that was healthy the whole time.
+// Cancellation is classified here, where the error is actually known: the
+// request is recorded with the client-closed sentinel rather than blamed on the
+// upstream, and at debug level because an impatient caller is normal traffic.
+// Real upstream failures keep the 502. See #1029.
+func newProxyErrorHandler(id string, proxyLogger *logmon.Monitor) func(http.ResponseWriter, *http.Request, error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		// Pick the log level first: a cancelled request is never an upstream
+		// fault, whether or not the sentinel ends up applying below.
+		switch {
+		case errors.Is(err, context.Canceled) || r.Context().Err() != nil:
+			proxyLogger.Debugf("<%s> request cancelled: %v", id, err)
+		case r.Context().Value(healthCheckKey{}) != nil:
+			proxyLogger.Debugf("<%s> health check not ready: %v", id, err)
+		default:
+			proxyLogger.Warnf("<%s> proxy error: %v", id, err)
+		}
+
+		// Only a client that actually hung up gets the recorded-only sentinel.
+		// A request cancelled server-side (an operator cancelling it from the
+		// UI, or shutdown) still has a client waiting, and must be answered —
+		// otherwise net/http finalizes it as an empty 200, telling the caller
+		// the request succeeded.
+		if swaputil.MarkClientClosed(w, r) || swaputil.ResponseStarted(w) {
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}
+}
 
 // cmdWaitDelay is the upper bound the runtime will wait for child I/O to
 // drain after the process exits before force-closing the stdout/stderr
@@ -82,14 +122,17 @@ type ProcessCommand struct {
 	stopCh      chan stopReq
 	waitReadyCh chan waitReadyReq
 
-	// current ProcessState. Written only by run(); read by State() via atomic load.
-	state atomic.Value
+	// current Status. Written only by run(); read by State() and Status()
+	// via atomic load.
+	status atomic.Pointer[Status]
 
 	// stores the active reverse-proxy handler when the process is running.
 	// Written only by run(); read by ServeHTTP via atomic load.
 	handler atomic.Pointer[http.HandlerFunc]
 
-	lastUse  atomic.Int64 // unix nano timestamp of last ServeHTTP completion
+	// lastUse is the unix-nano timestamp of the most recent activity baseline.
+	// It is initialized when the process becomes Ready and updated after ServeHTTP completes.
+	lastUse  atomic.Int64
 	inflight atomic.Int64 // current in-flight ServeHTTP calls
 }
 
@@ -114,7 +157,7 @@ func New(
 		waitReadyCh: make(chan waitReadyReq),
 		waitDelay:   cmdWaitDelay,
 	}
-	p.state.Store(StateStopped)
+	p.status.Store(&Status{State: StateStopped})
 
 	go p.run()
 	return p, nil
@@ -132,15 +175,23 @@ func (p *ProcessCommand) Logger() *logmon.Monitor { return p.processLogger }
 func (p *ProcessCommand) run() {
 	// Mutable state — only read/written from this goroutine. ServeHTTP reads
 	// p.handler concurrently, which is why handler is an atomic.Pointer.
-	// p.state mirrors `state` so State() can observe transitions; setState
+	// p.status mirrors `state` so State() can observe transitions; setState
 	// writes both.
 	state := StateStopped
 	setState := func(s ProcessState) {
 		old := state
 		state = s
-		p.state.Store(s)
+		next := &Status{State: s}
+		if s == StateReady {
+			if old == StateReady {
+				next.ReadySince = p.status.Load().ReadySince
+			} else {
+				next.ReadySince = time.Now()
+			}
+		}
+		p.status.Store(next)
 		if old != s {
-			event.Emit(shared.ProcessStateChangeEvent{
+			event.Emit(swaputil.ProcessStateChangeEvent{
 				ProcessName: p.id,
 				OldState:    string(old),
 				NewState:    string(s),
@@ -289,6 +340,10 @@ func (p *ProcessCommand) run() {
 					cmdCancel = res.cancel
 					fn := res.handlerFn
 					p.handler.Store(&fn)
+					// A newly ready process starts a fresh idle window. Without this,
+					// lastUse is zero on first start or stale after a restart, so TTL
+					// can unload it on the first one-second ticker tick.
+					p.lastUse.Store(time.Now().UnixNano())
 					setState(StateReady)
 					notifyWaiters(nil)
 					if req.block {
@@ -431,7 +486,13 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       time.Duration(p.config.Timeouts.IdleConn) * time.Second,
 	}
+	reverseProxy.ErrorHandler = newProxyErrorHandler(p.id, p.proxyLogger)
 	reverseProxy.ModifyResponse = func(resp *http.Response) error {
+		// Upstreams such as llama-server set their own CORS headers, and
+		// ReverseProxy adds rather than replaces them, so both llama-swap's
+		// and the upstream's would be sent. Keep only ours; see issue #85.
+		swaputil.StripUpstreamCORSHeaders(resp.Header)
+
 		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 			resp.Header.Set("X-Accel-Buffering", "no")
 		}
@@ -536,7 +597,10 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 			return abort(fmt.Errorf("health check timed out after %v", healthCheckTimeout))
 		}
 
-		req, _ := http.NewRequestWithContext(startCtx, "GET", p.config.CheckEndpoint, nil)
+		// Tagged so the proxy ErrorHandler logs a not-yet-listening upstream
+		// at debug rather than as a proxy error once per poll.
+		checkCtx := context.WithValue(startCtx, healthCheckKey{}, true)
+		req, _ := http.NewRequestWithContext(checkCtx, "GET", p.config.CheckEndpoint, nil)
 		rr := httptest.NewRecorder()
 		reverseProxy.ServeHTTP(rr, req)
 		resp := rr.Result()
@@ -577,9 +641,20 @@ func (p *ProcessCommand) sendStopSignal(cmd *exec.Cmd) error {
 		if err == nil {
 			p.processLogger.Debugf("<%s> sendStopSignal() running stop command: %s", p.id, strings.Join(stopArgs, " "))
 			stopCmd := exec.Command(stopArgs[0], stopArgs[1:]...)
+			stopCmd.Stderr = p.processLogger
+			stopCmd.Stdout = p.processLogger
+			// Bound the pipe copy so a CmdStop that backgrounds a child
+			// holding stdout/stderr cannot block Run() indefinitely.
+			stopCmd.WaitDelay = p.waitDelay
 			stopCmd.Env = cmd.Env
 			setProcAttributes(stopCmd)
 			runErr := stopCmd.Run()
+			// ErrWaitDelay is only returned when the stop command itself
+			// succeeded, so it is not a failure to stop the process.
+			if errors.Is(runErr, exec.ErrWaitDelay) {
+				p.processLogger.Warnf("<%s> sendStopSignal() stop command exited but a child held its output open; output may be truncated", p.id)
+				runErr = nil
+			}
 			if runErr != nil {
 				p.processLogger.Errorf("<%s> sendStopSignal() stop command failed: %v", p.id, runErr)
 			} else {
@@ -741,16 +816,24 @@ func (p *ProcessCommand) Stop(timeout time.Duration) error {
 }
 
 func (p *ProcessCommand) State() ProcessState {
-	if s, ok := p.state.Load().(ProcessState); ok {
-		return s
+	return p.Status().State
+}
+
+func (p *ProcessCommand) Status() Status {
+	if st := p.status.Load(); st != nil {
+		return *st
 	}
-	return StateStopped
+	return Status{State: StateStopped}
 }
 
 func (p *ProcessCommand) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fn := p.handler.Load()
 	if fn == nil {
-		http.Error(w, fmt.Sprintf("llama-swap-error: [%s] process is not ready", p.id), http.StatusServiceUnavailable)
+		swaputil.SendResponse(w, r, http.StatusServiceUnavailable, fmt.Sprintf("[%s] process is not ready", p.id))
+		return
+	}
+	if p.config.Compat.IgnoreWebsockets && swaputil.IsWebSocketUpgrade(r) {
+		(*fn)(w, r)
 		return
 	}
 	p.inflight.Add(1)

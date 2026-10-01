@@ -36,6 +36,7 @@ type fakeProcess struct {
 
 	mu          sync.Mutex
 	state       process.ProcessState
+	readySince  time.Time
 	readyCh     chan struct{}
 	stopCh      chan struct{}
 	runStarted  chan struct{} // closed on the first Run/EnsureReady call that starts
@@ -53,6 +54,10 @@ type fakeProcess struct {
 	opMu sync.Mutex
 
 	autoReady bool
+
+	// ensureErr, when non-nil, makes EnsureReady fail with it, driving the
+	// dispatch-error path without needing a real process to die.
+	ensureErr error
 
 	// serveBlock, when non-nil, makes ServeHTTP receive from it before
 	// writing its response. Tests use this to hold a request in-flight.
@@ -103,6 +108,11 @@ func (f *fakeProcess) setState(s process.ProcessState) {
 }
 
 func (f *fakeProcess) setStateLocked(s process.ProcessState) {
+	if s != process.StateReady {
+		f.readySince = time.Time{}
+	} else if f.state != process.StateReady {
+		f.readySince = time.Now()
+	}
 	f.state = s
 	switch s {
 	case process.StateReady:
@@ -128,6 +138,12 @@ func (f *fakeProcess) State() process.ProcessState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.state
+}
+
+func (f *fakeProcess) Status() process.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return process.Status{State: f.state, ReadySince: f.readySince}
 }
 
 func (f *fakeProcess) markReady() { f.setState(process.StateReady) }
@@ -223,6 +239,12 @@ func (f *fakeProcess) EnsureReady(ctx context.Context, _ time.Duration) error {
 
 	f.opMu.Lock()
 	f.mu.Lock()
+	if f.ensureErr != nil {
+		err := f.ensureErr
+		f.mu.Unlock()
+		f.opMu.Unlock()
+		return err
+	}
 	switch f.state {
 	case process.StateReady:
 		f.mu.Unlock()

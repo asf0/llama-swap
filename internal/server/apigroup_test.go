@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -13,15 +14,15 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/cache"
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/hw"
-	"github.com/mostlygeek/llama-swap/internal/shared"
 	"github.com/mostlygeek/llama-swap/internal/store"
+	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 func TestServer_InflightMiddleware_AddsAndRemovesEntriesAroundRequestHandling(t *testing.T) {
 	tracker := newInflightTracker()
-	mw := CreateInflightMiddleware(tracker)
+	mw := CreateInflightMiddleware(tracker, config.Config{})
 
-	var duringRequest shared.InFlightRequestsEvent
+	var duringRequest swaputil.InFlightRequestsEvent
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		duringRequest = tracker.Current()
 	}))
@@ -32,7 +33,7 @@ func TestServer_InflightMiddleware_AddsAndRemovesEntriesAroundRequestHandling(t 
 	req.Header.Set("User-Agent", "test-agent")
 	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
-	req = req.WithContext(shared.SetContext(req.Context(), shared.ReqContextData{
+	req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{
 		Model:    "requested-model",
 		ModelID:  "resolved-model",
 		Metadata: map[string]string{"source": "test"},
@@ -67,15 +68,37 @@ func TestServer_InflightMiddleware_AddsAndRemovesEntriesAroundRequestHandling(t 
 	}
 }
 
+func TestServer_InflightMiddleware_IgnoresConfiguredWebsocket(t *testing.T) {
+	tracker := newInflightTracker()
+	cfg := config.Config{Models: map[string]config.ModelConfig{
+		"m1": {Compat: config.CompatConfig{IgnoreWebsockets: true}},
+	}}
+	var duringRequest swaputil.InFlightRequestsEvent
+	handler := CreateInflightMiddleware(tracker, cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		duringRequest = tracker.Current()
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/props?model=m1", nil)
+	req.Header.Set("Connection", "keep-alive, Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{Model: "m1", ModelID: "m1"}))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(duringRequest.Requests) != 0 {
+		t.Fatalf("inflight during ignored websocket = %+v, want empty", duringRequest)
+	}
+}
+
 func TestServer_InflightMiddleware_StreamsResponseUpdates(t *testing.T) {
-	events := make(chan shared.InFlightRequestsEvent, 8)
-	tracker := newInflightTrackerWithPublisher(8, func(update shared.InFlightRequestsEvent) {
+	events := make(chan swaputil.InFlightRequestsEvent, 8)
+	tracker := newInflightTrackerWithPublisher(8, func(update swaputil.InFlightRequestsEvent) {
 		events <- update
 	})
 
 	release := make(chan struct{})
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Set-Cookie", "secret=value")
 		w.WriteHeader(http.StatusOK)
@@ -87,7 +110,7 @@ func TestServer_InflightMiddleware_StreamsResponseUpdates(t *testing.T) {
 	go func() {
 		defer close(done)
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		req = req.WithContext(shared.SetContext(req.Context(), shared.ReqContextData{ModelID: "m1"}))
+		req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{ModelID: "m1"}))
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 
@@ -118,21 +141,21 @@ func TestServer_InflightMiddleware_StreamsResponseUpdates(t *testing.T) {
 }
 
 func TestServer_InflightEventPayloadIncludesRequestEntries(t *testing.T) {
-	events := make(chan shared.InFlightRequestsEvent, 4)
-	tracker := newInflightTrackerWithPublisher(4, func(update shared.InFlightRequestsEvent) {
+	events := make(chan swaputil.InFlightRequestsEvent, 4)
+	tracker := newInflightTrackerWithPublisher(4, func(update swaputil.InFlightRequestsEvent) {
 		events <- update
 	})
 
 	release := make(chan struct{})
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 	}))
 
 	go func() {
 		defer close(done)
 		req := httptest.NewRequest(http.MethodGet, "/props?model=m1", nil)
-		req = req.WithContext(shared.SetContext(req.Context(), shared.ReqContextData{
+		req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{
 			Model:   "m1",
 			ModelID: "m1",
 		}))
@@ -162,10 +185,10 @@ func TestServer_InflightEventPayloadIncludesRequestEntries(t *testing.T) {
 func TestServer_InflightTracker_OutboxDoesNotBlockRequests(t *testing.T) {
 	publishStarted := make(chan struct{})
 	releasePublisher := make(chan struct{})
-	published := make(chan shared.InFlightRequestsEvent, 4)
+	published := make(chan swaputil.InFlightRequestsEvent, 4)
 	var blockFirst sync.Once
 
-	tracker := newInflightTrackerWithPublisher(1, func(update shared.InFlightRequestsEvent) {
+	tracker := newInflightTrackerWithPublisher(1, func(update swaputil.InFlightRequestsEvent) {
 		blockFirst.Do(func() {
 			close(publishStarted)
 			<-releasePublisher
@@ -207,7 +230,7 @@ func TestServer_InflightCancelByIDCancelsRequestContext(t *testing.T) {
 	tracker := newInflightTracker()
 	idCh := make(chan string, 1)
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		current := tracker.Current()
 		if len(current.Requests) != 1 {
 			t.Errorf("inflight requests = %d, want 1", len(current.Requests))
@@ -220,7 +243,7 @@ func TestServer_InflightCancelByIDCancelsRequestContext(t *testing.T) {
 
 	go func() {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		req = req.WithContext(shared.SetContext(req.Context(), shared.ReqContextData{ModelID: "m1"}))
+		req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{ModelID: "m1"}))
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 
@@ -259,7 +282,7 @@ func waitInflightTrackerCount(t *testing.T, tracker *inflightTracker, total int)
 	}
 }
 
-func waitInflightEvent(t *testing.T, events <-chan shared.InFlightRequestsEvent, operation string) shared.InFlightRequestsEvent {
+func waitInflightEvent(t *testing.T, events <-chan swaputil.InFlightRequestsEvent, operation string) swaputil.InFlightRequestsEvent {
 	t.Helper()
 	timer := time.After(2 * time.Second)
 	for {
@@ -395,6 +418,93 @@ func TestServer_APIMetricsActivity(t *testing.T) {
 	}
 }
 
+func TestServer_APIMetricsActivityFilters(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+
+	// ids 1..4 at ts_created 1000..1003, models m1/m2/m1/m3.
+	for i, model := range []string{"m1", "m2", "m1", "m3"} {
+		if _, ok := s.metrics.queueMetrics(ActivityLogEntry{
+			Timestamp: time.Unix(int64(1000+i), 0),
+			Model:     model,
+			ReqPath:   "/v1/chat/completions",
+		}); !ok {
+			t.Fatal("queueMetrics failed")
+		}
+	}
+
+	// ts_created 1000..1003 as RFC3339. The UI never sends these; they are
+	// part of the API for direct consumers.
+	at := func(offset int) string {
+		return url.QueryEscape(time.Unix(int64(1000+offset), 0).UTC().Format(time.RFC3339))
+	}
+
+	tests := []struct {
+		name  string
+		query string
+		want  []int
+	}{
+		{"repeated model", "?model=m1&model=m3", []int{4, 3, 1}},
+		{"single model still works", "?model=m2", []int{2}},
+		{"id range", "?min_id=2&max_id=3", []int{3, 2}},
+		{"min id only", "?min_id=4", []int{4}},
+		{"max id only", "?max_id=2", []int{2, 1}},
+		{"id range and model combined", "?model=m1&min_id=2", []int{3}},
+		{"start only", "?start=" + at(2), []int{4, 3}},
+		{"end only", "?end=" + at(1), []int{2, 1}},
+		{"time range inclusive", "?start=" + at(1) + "&end=" + at(2), []int{3, 2}},
+		{"time and model combined", "?start=" + at(0) + "&end=" + at(3) + "&model=m1", []int{3, 1}},
+		{"time and id range combined", "?start=" + at(0) + "&min_id=3", []int{4, 3}},
+		{"no filters", "", []int{4, 3, 2, 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/metrics/activity"+tt.query, nil))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d body=%q", w.Code, w.Body.String())
+			}
+			var page store.ActivityPage
+			if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if page.Total != len(tt.want) {
+				t.Fatalf("Total = %d, want %d", page.Total, len(tt.want))
+			}
+			if len(page.Data) != len(tt.want) {
+				t.Fatalf("len(Data) = %d, want %d", len(page.Data), len(tt.want))
+			}
+			for i, wantID := range tt.want {
+				if page.Data[i].ID != wantID {
+					t.Fatalf("Data[%d].ID = %d, want %d", i, page.Data[i].ID, wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestServer_APIMetricsActivityInvalidFilters(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+
+	for _, query := range []string{
+		"?min_id=abc",
+		"?max_id=0",
+		"?min_id=-1",
+		"?min_id=9&max_id=2",
+		"?start=nonsense",
+		"?end=2026-01-01",
+		"?start=2026-02-01T00:00:00Z&end=2026-01-01T00:00:00Z",
+	} {
+		t.Run(query, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/metrics/activity"+query, nil))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body=%q)", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestServer_APIMetricsStats(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	for _, entry := range []ActivityLogEntry{
@@ -512,9 +622,98 @@ func TestServer_APIEvents_InitialPayload(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	for _, want := range []string{`"type":"modelStatus"`, `"type":"inflight"`, `"type":"uiConfig"`, `"type":"profileChanged"`, `"type":"logData"`, `X-Trace-ID`} {
+	for _, want := range []string{`"type":"modelStatus"`, `"type":"inflight"`, `"type":"uiConfig"`, `"type":"profileChanged"`, `X-Trace-ID`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("initial SSE payload missing %s; body=%q", want, body)
+		}
+	}
+	// Log data has its own stream, /api/events/logs.
+	if strings.Contains(body, `"type":"logData"`) {
+		t.Errorf("/api/events should not carry log data; body=%q", body)
+	}
+}
+
+// serveLogEvents runs GET target against s for a short time. during is called
+// once the handler has subscribed, so it can write live log lines. It returns
+// the recorded response after the handler exits.
+func serveLogEvents(t *testing.T, s *Server, target string, during func()) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		s.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if during != nil {
+		during()
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after context cancel")
+	}
+	return w
+}
+
+func TestServer_APILogEvents_SelectedStreams(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	s.logs.ProxyLogs.Info("PROXYHIST")
+	s.logs.UpstreamLogs.Info("UPSTREAMHIST")
+	s.logs.HttpLogs.Info("HTTPHIST")
+
+	w := serveLogEvents(t, s, "/api/events/logs?stream=proxy&stream=http", func() {
+		s.logs.ProxyLogs.Info("PROXYLIVE")
+		s.logs.UpstreamLogs.Info("UPSTREAMLIVE")
+		s.logs.HttpLogs.Info("HTTPLIVE")
+	})
+
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"type":"logData"`, `\"source\":\"proxy\"`, `\"source\":\"http\"`, "PROXYHIST", "HTTPHIST", "PROXYLIVE", "HTTPLIVE"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("log stream missing %s; body=%q", want, body)
+		}
+	}
+	for _, notWant := range []string{`\"source\":\"upstream\"`, "UPSTREAMHIST", "UPSTREAMLIVE"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("log stream should not contain %s; body=%q", notWant, body)
+		}
+	}
+}
+
+func TestServer_APILogEvents_NoHistory(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	s.logs.UpstreamLogs.Info("UPSTREAMHIST")
+
+	w := serveLogEvents(t, s, "/api/events/logs?stream=upstream&no-history", func() {
+		s.logs.UpstreamLogs.Info("UPSTREAMLIVE")
+	})
+
+	body := w.Body.String()
+	if strings.Contains(body, "UPSTREAMHIST") {
+		t.Errorf("history should be skipped; body=%q", body)
+	}
+	if !strings.Contains(body, "UPSTREAMLIVE") {
+		t.Errorf("live data missing; body=%q", body)
+	}
+}
+
+func TestServer_APILogEvents_InvalidStream(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	for _, target := range []string{"/api/events/logs", "/api/events/logs?stream=proxy&stream=bogus"} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", target, w.Code)
 		}
 	}
 }

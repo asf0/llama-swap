@@ -87,6 +87,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		config.UnloadTimeout = DEFAULT_UNLOAD_TIMEOUT
 	}
 
+	if config.GlobalConcurrencyLimit < 0 {
+		return Config{}, fmt.Errorf("globalConcurrencyLimit must be >= 0")
+	}
+
 	config.UI.Activity.SessionID = normalizeHeaderNames(config.UI.Activity.SessionID)
 
 	if config.Store != nil {
@@ -101,10 +105,12 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		config.Upstream.IgnorePaths = DefaultUpstreamIgnorePaths()
 	}
 
-	switch config.LogToStdout {
-	case LogToStdoutProxy, LogToStdoutUpstream, LogToStdoutBoth, LogToStdoutNone:
-	default:
-		return Config{}, fmt.Errorf("logToStdout must be one of: proxy, upstream, both, none")
+	if err := config.Security.CORS.Validate(); err != nil {
+		return Config{}, fmt.Errorf("security.cors: %w", err)
+	}
+
+	if _, _, _, err := ParseLogToStdout(config.LogToStdout); err != nil {
+		return Config{}, err
 	}
 
 	// Populate the aliases map
@@ -128,6 +134,12 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	for _, modelId := range modelIds {
 		modelConfig := config.Models[modelId]
 		modelConfig.HealthCheckTimeout = config.HealthCheckTimeout
+		if modelId == ComfyUIModelID {
+			if modelConfig.ConcurrencyLimit < comfyUIConcurrencyLimit {
+				modelConfig.ConcurrencyLimit = comfyUIConcurrencyLimit
+			}
+			modelConfig.Compat.IgnoreWebsockets = true
+		}
 
 		// set model TTL to globalTTL it is the default value
 		if modelConfig.UnloadAfter == MODEL_CONFIG_DEFAULT_TTL {
@@ -303,6 +315,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		return Config{}, err
 	}
 
+	if err := validateTailcatConfig(&config); err != nil {
+		return Config{}, err
+	}
+
 	return config, nil
 }
 
@@ -348,6 +364,11 @@ func validateProfiles(config Config) error {
 				}
 				return fmt.Errorf("profiles.%s.pins.%s references unknown model %q", profileName, pin, target)
 			}
+		}
+	}
+	if profile := config.Hooks.OnStartup.Profile; profile != "" {
+		if _, found := config.Profiles[profile]; !found {
+			return fmt.Errorf("hooks.on_startup.profile references unknown profile %q", profile)
 		}
 	}
 	return nil

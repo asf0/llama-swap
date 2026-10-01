@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,9 +14,35 @@ const DEFAULT_UNLOAD_TIMEOUT = 10
 const (
 	LogToStdoutProxy    = "proxy"
 	LogToStdoutUpstream = "upstream"
+	LogToStdoutHTTP     = "http"
 	LogToStdoutBoth     = "both"
 	LogToStdoutNone     = "none"
 )
+
+// ParseLogToStdout reports which log streams logToStdout sends to stdout. It
+// accepts "none", "both" (every stream), or a comma separated list of
+// "proxy", "upstream" and "http".
+func ParseLogToStdout(value string) (proxy, upstream, http bool, err error) {
+	switch strings.TrimSpace(value) {
+	case LogToStdoutNone:
+		return false, false, false, nil
+	case LogToStdoutBoth:
+		return true, true, true, nil
+	}
+	for item := range strings.SplitSeq(value, ",") {
+		switch strings.TrimSpace(item) {
+		case LogToStdoutProxy:
+			proxy = true
+		case LogToStdoutUpstream:
+			upstream = true
+		case LogToStdoutHTTP:
+			http = true
+		default:
+			return false, false, false, fmt.Errorf("logToStdout must be none, both, or a comma separated list of proxy, upstream, http; got %q", value)
+		}
+	}
+	return proxy, upstream, http, nil
+}
 
 type MacroEntry struct {
 	Name  string
@@ -51,6 +78,25 @@ func (ml *MacroList) UnmarshalYAML(value *yaml.Node) error {
 
 	*ml = entries
 	return nil
+}
+
+// MarshalYAML renders the list back as an ordered mapping, the shape it is
+// written in, rather than the default slice-of-structs. Only diagnostics such
+// as the config__get_config tool marshal a Config, but when they do the macro
+// block should read like the source file.
+func (ml MacroList) MarshalYAML() (interface{}, error) {
+	node := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	for _, entry := range ml {
+		var key, value yaml.Node
+		if err := key.Encode(entry.Name); err != nil {
+			return nil, fmt.Errorf("encoding macro name %q: %w", entry.Name, err)
+		}
+		if err := value.Encode(entry.Value); err != nil {
+			return nil, fmt.Errorf("encoding macro value for %q: %w", entry.Name, err)
+		}
+		node.Content = append(node.Content, &key, &value)
+	}
+	return node, nil
 }
 
 // Get retrieves a macro value by name
@@ -94,6 +140,7 @@ type HooksConfig struct {
 
 type HookOnStartup struct {
 	Preload []string `yaml:"preload"`
+	Profile string   `yaml:"profile"`
 }
 
 type Store struct {
@@ -132,21 +179,27 @@ func (c *ProfileConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	HealthCheckTimeout int                       `yaml:"healthCheckTimeout"`
-	LogRequests        bool                      `yaml:"logRequests"`
-	LogLevel           string                    `yaml:"logLevel"`
-	LogTimeFormat      string                    `yaml:"logTimeFormat"`
-	LogToStdout        string                    `yaml:"logToStdout"`
-	MetricsMaxInMemory int                       `yaml:"metricsMaxInMemory"`
-	CaptureBuffer      int                       `yaml:"captureBuffer"`
-	Store              *Store                    `yaml:"store"`
-	UI                 UIConfig                  `yaml:"ui"`
-	Performance        PerformanceConfig         `yaml:"performance"`
-	GlobalTTL          int                       `yaml:"globalTTL"`
-	UnloadTimeout      int                       `yaml:"unloadTimeout"`
-	Models             map[string]ModelConfig    `yaml:"models"` /* key is model ID */
-	Profiles           map[string]ProfileConfig  `yaml:"profiles"`
-	Selectors          map[string]SelectorConfig `yaml:"selectors"`
+	Tailcat            *TailcatConfig    `yaml:"tailcat"`
+	HealthCheckTimeout int               `yaml:"healthCheckTimeout"`
+	LogRequests        bool              `yaml:"logRequests"`
+	LogLevel           string            `yaml:"logLevel"`
+	LogTimeFormat      string            `yaml:"logTimeFormat"`
+	LogToStdout        string            `yaml:"logToStdout"`
+	MetricsMaxInMemory int               `yaml:"metricsMaxInMemory"`
+	CaptureBuffer      int               `yaml:"captureBuffer"`
+	Store              *Store            `yaml:"store"`
+	UI                 UIConfig          `yaml:"ui"`
+	Performance        PerformanceConfig `yaml:"performance"`
+	GlobalTTL          int               `yaml:"globalTTL"`
+	UnloadTimeout      int               `yaml:"unloadTimeout"`
+
+	Models    map[string]ModelConfig    `yaml:"models"` /* key is model ID */
+	Profiles  map[string]ProfileConfig  `yaml:"profiles"`
+	Selectors map[string]SelectorConfig `yaml:"selectors"`
+
+	// GlobalConcurrencyLimit caps the number of inference requests served at
+	// once across all models. 0 (default) means no limit. See issue #1086.
+	GlobalConcurrencyLimit int `yaml:"globalConcurrencyLimit"`
 
 	// routing is the canonical source for swap/scheduling configuration.
 	// New code must read Routing, never the backwards-compat fields below.
@@ -184,6 +237,25 @@ type Config struct {
 
 	// upstream controls behaviour of the /upstream passthrough endpoint
 	Upstream UpstreamConfig `yaml:"upstream"`
+
+	// security groups CORS and related hardening settings, see issue #1133
+	Security SecurityConfig `yaml:"security"`
+
+	// tailcatEnabled records whether this process started a Tailcat listener.
+	// It is runtime state, not user configuration, so it must never appear in
+	// rendered configuration output.
+	tailcatEnabled bool
+}
+
+// SetTailcatEnabled records whether this process has a Tailcat listener.
+// main owns this startup-only setting from -listen-tailcat.
+func (c *Config) SetTailcatEnabled(enabled bool) {
+	c.tailcatEnabled = enabled
+}
+
+// TailcatEnabled reports whether this process has a Tailcat listener.
+func (c Config) TailcatEnabled() bool {
+	return c.tailcatEnabled
 }
 
 // RoutingConfig is the canonical, normalized routing/scheduling configuration.
