@@ -287,6 +287,7 @@ func setLocalHint(r *http.Request, p process.Process) {
 
 func (b *baseRouter) doSwap(ctx context.Context, modelID string, generation uint64, toStop []string) {
 	timeout := b.healthCheckTimeout()
+	startTimeout := b.startTimeout(modelID)
 
 	var wg sync.WaitGroup
 	for _, mID := range toStop {
@@ -310,7 +311,7 @@ func (b *baseRouter) doSwap(ctx context.Context, modelID string, generation uint
 	// process nobody was ever going to start (issue #946). EnsureReady makes
 	// the same decision inside the process, where the state is owned.
 	target := b.processes[modelID]
-	err := target.EnsureReady(ctx, timeout)
+	err := target.EnsureReady(ctx, startTimeout)
 	if err != nil && ctx.Err() == nil {
 		// Cancellation during unload or shutdown is expected.
 		b.logger.Warnf("%s: starting %s failed: %v", b.name, modelID, err)
@@ -388,6 +389,16 @@ func (b *baseRouter) healthCheckTimeout() time.Duration {
 		return 30 * time.Second
 	}
 	return t
+}
+
+// startTimeout is how long the target model may take to become ready. A
+// per-model healthCheckTimeout wins; zero (the config loader fills it with the
+// global value) falls back to the global timeout.
+func (b *baseRouter) startTimeout(modelID string) time.Duration {
+	if mc, ok := b.config.Models[modelID]; ok && mc.HealthCheckTimeout > 0 {
+		return time.Duration(mc.HealthCheckTimeout) * time.Second
+	}
+	return b.healthCheckTimeout()
 }
 
 // unloadTimeout returns the graceful stop timeout for a model. Config parsing

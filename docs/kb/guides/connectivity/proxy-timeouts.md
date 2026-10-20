@@ -3,8 +3,8 @@ title: Proxy and model startup timeouts
 summary: Distinguish client proxy timeouts from health-check and model startup failures, and fix 502 EOF errors after streams.
 category: guides
 tags: [proxy, timeout, health-check, loading, keep-alive, 502, eof]
-config_keys: [healthCheckTimeout, models.*.proxy, models.*.checkEndpoint, models.*.timeouts.idleConn, models.*.disableKeepAlives]
-updated: 2026-10-07
+config_keys: [healthCheckTimeout, models.*.healthCheckTimeout, models.*.proxy, models.*.checkEndpoint, models.*.timeouts.idleConn, models.*.disableKeepAlives]
+updated: 2026-10-20
 ---
 
 # Proxy and model startup timeouts
@@ -16,6 +16,25 @@ reach, and `checkEndpoint` must return success there.
 If a request times out after the process starts, verify the proxy URL and
 endpoint from the llama-swap host first. Raising a timeout only hides a wrong
 port, Docker mapping, or unavailable health endpoint.
+
+## Per-model startup timeout
+
+A model that loads much more slowly than the rest can set its own
+`healthCheckTimeout`. A non-zero model value wins; omitting it or setting `0`
+uses the global value. Values below 15 seconds are clamped to the minimum.
+
+```yaml
+healthCheckTimeout: 120
+
+models:
+  huge-model:
+    cmd: llama-server --port ${PORT} -m huge.gguf
+    healthCheckTimeout: 900
+```
+
+The override applies only while starting that model. Stopping evicted models
+still uses the global timeout, so a long load timeout does not also make an
+unrelated swap wait forever for a hung shutdown.
 
 ## 502 "proxy error: EOF" right after a stream
 
