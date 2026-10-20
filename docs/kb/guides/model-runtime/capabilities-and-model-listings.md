@@ -2,9 +2,9 @@
 title: Model capabilities and model listings
 summary: Advertise images, tools and context length in /v1/models, automatically or by hand.
 category: guides
-tags: [capabilities, voices, speech, models, tools, vision, context, autodetect, llama-server, vllm, halogen, playground, decisions]
+tags: [capabilities, voices, speech, models, tools, vision, context, autodetect, llama-server, vllm, halogen, playground, decisions, gguf, metadata]
 config_keys: [models.*.capabilities, models.*.capabilities.disableAuto, models.*.capabilities.voices, store.path]
-updated: 2026-10-10
+updated: 2026-10-20
 ---
 
 # Model capabilities and model listings
@@ -77,6 +77,78 @@ curl -s localhost:PORT/v1/models | jq -r '.data[0].owned_by'
 Servers reporting anything else are left alone, including image, speech and
 transcription servers, which have no capability surface to read. A llama.cpp
 fork that keeps the upstream API reports `llamacpp` and is read the same way.
+
+## Automatic metadata from cmd and GGUF
+
+Discovery needs a running server. Before a model has ever loaded, llama-swap
+also reads what it can from the model's `cmd` and, when the command points at a
+local GGUF file, from that file's metadata header. This is best-effort: an
+unreadable file or an unrecognized flag leaves the corresponding fields out,
+and it never fails config loading.
+
+From the command line it infers:
+
+- the runtime context window: `--ctx-size`, `--context-size` or `-c` for
+  llama.cpp, `--max-seq` for hipfire, `--max-model-len` for vLLM and
+  `--context-length` for SGLang. For llama.cpp the value is divided by
+  `--parallel` only when KV caches are per slot; with `--kv-unified` (or
+  `-kvu`) the pool is shared, so the per-slot window is the full
+  `--ctx-size`. `--kv-unified-per-slot N` caps it at N. When several flags are
+  present, `--max-seq` wins over `--max-model-len`, which wins over
+  `--context-length`, which wins over the llama.cpp spellings.
+- image input when `--mmproj` or `--mm-proj` is present, reported as
+  `in: [text, image]`.
+- quantization from the model filename, such as `Q4_K_XL` or `MQ4-XTS`.
+- draft and speculative-decoding facts from `--model-draft`, `--spec-type`
+  and `--spec-draft-n-max`.
+
+From a local GGUF file it reads the model name, description, architecture,
+size label, the context length the model was trained for and the chat
+template. Only the header is read, never the weights; the parsed header is
+cached per file so a config reload does not re-read it.
+
+Tool support is inferred conservatively from that chat template: it must have
+a tools guard such as `{%- if tools %}` and a tool-call representation such as
+`tool_call`, `function_call` or `<function=`. Models started with `--embedding`
+or `--no-jinja` are skipped. This makes the Function Calling tag appear before
+the first load; once the model has been probed, the discovered value is
+authoritative even when it says no tools.
+
+```bash
+curl -s localhost:8080/v1/models | jq '.data[0] | {
+  context_length,
+  meta: .meta.llamaswap
+}'
+```
+
+Those facts appear in `meta.llamaswap` as `modelArchitecture`, `quantization`,
+`trainedContext`, `sizeLabel`, `draft`, `spec`, `scanSource` and
+`contextSource`. A `metadata` key you write yourself always wins over a scanned
+value of the same name.
+
+`context_length` is the window one request can actually use: the runtime
+window the server was started with, after `--parallel` is taken into account.
+`trainedContext` is the window the model was trained for and is usually
+larger. They are deliberately separate; a server started with a small
+`--ctx-size` must not advertise the trained maximum.
+
+### Precedence
+
+Capabilities are resolved in this order, field by field:
+
+1. explicit `capabilities` in the config
+2. values discovered from the running upstream and cached in the store
+3. values inferred from `cmd` and the GGUF header
+
+`capabilities.disableAuto: true` turns off both discovery and pre-load
+inference, leaving exactly what the config says. The `contextSource` field in
+`meta.llamaswap` reports which of the three supplied the advertised context:
+`config`, `discovered` or `cmd`.
+
+Tool support follows the same order, with one extra rule: once a capability
+probe has produced a result for the model, its answer is used even when it is
+false. A pre-load heuristic therefore cannot keep advertising tools after the
+loaded server has said the template does not support them.
 
 ## Setting capabilities by hand
 
@@ -169,9 +241,12 @@ they never sort to the top of their own tab.
 
 ## What goes wrong
 
-**A model that has never been loaded shows nothing.** The server has to be
-running to be asked. Load the model once and the values appear, including
-after it unloads again.
+**A model that has never been loaded shows less.** Upstream discovery needs the
+server to be running to be asked, so tools and anything else only the server
+knows are absent until the first load. Facts read from `cmd` and the GGUF
+header (context, vision, architecture, quantization) are available immediately.
+Load the model once and the discovered values appear, including after it
+unloads again.
 
 **Discovered values do not survive a restart unless you configure a store.**
 The cache lives in llama-swap's SQLite database, which is in memory unless

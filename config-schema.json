@@ -317,6 +317,73 @@
         "macros": {
             "$ref": "#/definitions/macros"
         },
+        "filters": {
+            "type": "object",
+            "properties": {
+                "stripParams": {
+                    "type": "string",
+                    "default": "",
+                    "pattern": "^[a-zA-Z0-9_, ]*$",
+                    "description": "Comma separated list of parameters to remove from requests to local models. Combined with each model's own stripParams. The 'model' parameter can never be removed."
+                },
+                "setParams": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "default": {},
+                    "description": "Dictionary of parameters to set/override in requests to local models. Merged recursively with each model's own setParams; model keys win. A key ending in '?' (e.g. 'max_tokens?') is set-if-undefined: it is only applied when the request does not already contain that parameter. Protected params like 'model' cannot be overridden."
+                },
+                "setParamsByID": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "default": {},
+                    "description": "Dictionary mapping requested model IDs (or aliases) to parameters to set/override in requests. Merged with each model's own setParamsByID; model params win. Global keys are not auto-registered as aliases. A parameter key ending in '?' (e.g. 'max_tokens?') is set-if-undefined. Keys support ${MODEL_ID} macro substitution. Protected params like 'model' cannot be overridden."
+                },
+                "setParamsByMatch": {
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {
+                                        "type": "string",
+                                        "pattern": "^[A-Za-z0-9_-]+$",
+                                        "description": "Top-level request field to inspect (e.g. reasoning_effort). Must not be 'model' and may only contain letters, digits, underscores, and hyphens."
+                                    },
+                                    "match": {
+                                        "type": "string",
+                                        "description": "Value the key must equal for the rule to apply. Non-string JSON values are compared by their string form, so booleans and numbers must be quoted."
+                                    },
+                                    "set": {
+                                        "type": "object",
+                                        "additionalProperties": true,
+                                        "minProperties": 1,
+                                        "description": "Parameters to apply when the rule matches. Object values are merged into an existing request object rather than replacing it. Protected params like 'model' cannot be overridden."
+                                    }
+                                },
+                                "required": [
+                                    "key",
+                                    "match",
+                                    "set"
+                                ],
+                                "additionalProperties": false
+                            }
+                        },
+                        {
+                            "$ref": "#/definitions/macroReference"
+                        }
+                    ],
+                    "default": [],
+                    "description": "List of rules that set parameters when a request field equals a value, or a whole-value macro reference (e.g. ${my_rules}) expanding to such a list. Appended after each model's own rules, so model rules win on shared keys. Applied after stripParams and before setParams/setParamsByID."
+                }
+            },
+            "additionalProperties": false,
+            "default": {},
+            "description": "Default filter settings inherited by every local model. Model filters merge on top; set filters.inherit to false on a model to opt out. Peers never inherit these filters."
+        },
         "profiles": {
             "type": "object",
             "default": {},
@@ -632,11 +699,16 @@
                                 ],
                                 "default": [],
                                 "description": "List of rules that set parameters when a request field equals a value, or a whole-value macro reference (e.g. ${my_rules}) expanding to such a list. Rules are evaluated in order and every matching rule applies, so a later rule overrides an earlier one. Applied after stripParams and before setParams/setParamsByID. Because rules match on the request body instead of the model ID, clients can vary parameters between requests without causing a model swap."
+                            },
+                            "inherit": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Inherit the top-level filters. Set to false to use only this model's filters. Omitted or true merges the model's filters on top of the top-level defaults."
                             }
                         },
                         "additionalProperties": false,
                         "default": {},
-                        "description": "Dictionary of filter settings. Supports stripParams, setParams, setParamsByID, and setParamsByMatch."
+                        "description": "Dictionary of filter settings. Supports stripParams, setParams, setParamsByID, setParamsByMatch, and inherit. Model filters merge on top of the top-level filters unless inherit is false."
                     },
                     "metadata": {
                         "type": "object",

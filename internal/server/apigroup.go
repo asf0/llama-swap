@@ -30,6 +30,19 @@ type apiModel struct {
 	Aliases       []string       `json:"aliases,omitempty"`
 	Capabilities  map[string]any `json:"capabilities,omitempty"`
 	ContextLength int            `json:"context_length,omitempty"`
+	// ContextSource says where ContextLength came from: config, discovered
+	// or cmd.
+	ContextSource string `json:"contextSource,omitempty"`
+	// Scanned facts are read before the model is loaded: the model file's
+	// architecture, quantization, trained context and size label, plus the
+	// draft and speculative-decoding settings from the command line.
+	ModelArchitecture string `json:"modelArchitecture,omitempty"`
+	Quantization      string `json:"quantization,omitempty"`
+	TrainedContext    int    `json:"trainedContext,omitempty"`
+	SizeLabel         string `json:"sizeLabel,omitempty"`
+	Draft             string `json:"draft,omitempty"`
+	Spec              string `json:"spec,omitempty"`
+	ScanSource        string `json:"scanSource,omitempty"`
 	// UiURL is the backend's own UI, linked from the dashboard when set.
 	UiURL string `json:"uiUrl,omitempty"`
 	// ReadySince is when the model last became ready (RFC 3339). Only set
@@ -145,22 +158,38 @@ func (s *Server) modelStatus() []apiModel {
 		// listing never disagree about what a model can do. Bound by
 		// shutdownCtx rather than a request: modelStatus is also called from
 		// event callbacks that have no request of their own.
-		caps := s.resolveCapabilities(s.shutdownCtx, id, mc)
+		caps, contextSource := s.resolveCapabilitiesWithSource(s.shutdownCtx, id, mc)
 		_, capsMap, _, ctxLen := renderCapabilities(caps)
+		name := mc.Name
+		if strings.TrimSpace(name) == "" {
+			name = mc.Scanned.Name
+		}
+		description := mc.Description
+		if strings.TrimSpace(description) == "" {
+			description = mc.Scanned.Description
+		}
 		models = append(models, apiModel{
-			Id:              id,
-			Name:            mc.Name,
-			Description:     mc.Description,
-			State:           state,
-			Unlisted:        mc.Unlisted,
-			Aliases:         mc.Aliases,
-			Capabilities:    capsMap,
-			ContextLength:   ctxLen,
-			UiURL:           mc.UiURL,
-			ReadySince:      readySince,
-			UptimeMs:        uptimeMs,
-			LoadingProgress: loading.Progress,
-			LoadingMessage:  loading.Message,
+			Id:                id,
+			Name:              name,
+			Description:       description,
+			State:             state,
+			Unlisted:          mc.Unlisted,
+			Aliases:           mc.Aliases,
+			Capabilities:      capsMap,
+			ContextLength:     ctxLen,
+			ContextSource:     contextSource,
+			ModelArchitecture: mc.Scanned.Architecture,
+			Quantization:      mc.Scanned.Quantization,
+			TrainedContext:    mc.Scanned.TrainedContext,
+			SizeLabel:         mc.Scanned.SizeLabel,
+			Draft:             mc.Scanned.Draft,
+			Spec:              mc.Scanned.Spec,
+			ScanSource:        mc.Scanned.Source,
+			UiURL:             mc.UiURL,
+			ReadySince:        readySince,
+			UptimeMs:          uptimeMs,
+			LoadingProgress:   loading.Progress,
+			LoadingMessage:    loading.Message,
 		})
 	}
 

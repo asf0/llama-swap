@@ -265,6 +265,17 @@ type ModelConfig struct {
 	// Capabilities defines what modalities and features the model supports.
 	Capabilities ModelCapConfig `yaml:"capabilities"`
 
+	// Inferred holds capabilities read from Cmd before the model is ever
+	// loaded: a runtime context window and vision when --mmproj is present.
+	// It is filled during config loading and is lower priority than both
+	// explicit Capabilities and values discovered from a running upstream.
+	Inferred ModelCapConfig `yaml:"-"`
+
+	// Scanned holds model facts read from Cmd and the GGUF header, such as
+	// architecture, quantization and the trained context. It is populated
+	// during config loading and is reported alongside the model listing.
+	Scanned ModelScanInfo `yaml:"-"`
+
 	// HealthCheckTimeout overrides the global healthCheckTimeout for this
 	// model when non-zero. Config loading fills in the global value and clamps
 	// the effective value to the 15-second minimum.
@@ -322,7 +333,17 @@ func (m *ModelConfig) SanitizedCommand() ([]string, error) {
 // ModelFilters embeds Filters and adds legacy support for strip_params field
 // See issue #174
 type ModelFilters struct {
+	// Inherit controls whether the model inherits the top-level filters.
+	// nil means inherit, which is the default; false opts out entirely.
+	Inherit *bool `yaml:"inherit"`
+
 	Filters `yaml:",inline"`
+}
+
+// InheritsGlobal reports whether the model should inherit the top-level
+// filters. An omitted inherit (nil) means yes.
+func (f ModelFilters) InheritsGlobal() bool {
+	return f.Inherit == nil || *f.Inherit
 }
 
 func (m *ModelFilters) UnmarshalYAML(unmarshal func(interface{}) error) error {

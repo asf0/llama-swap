@@ -133,6 +133,38 @@ func filterCappedMetadata(md map[string]any) map[string]any {
 	return filtered
 }
 
+// scannedMetadata returns the pre-load facts about a local model that are safe
+// to expose in a model listing. Paths and command lines are deliberately
+// absent: only basenames and facts that describe the model itself appear.
+func scannedMetadata(scan config.ModelScanInfo, contextSource string) map[string]any {
+	md := make(map[string]any)
+	if contextSource != "" {
+		md["contextSource"] = contextSource
+	}
+	if scan.Architecture != "" {
+		md["modelArchitecture"] = scan.Architecture
+	}
+	if scan.Quantization != "" {
+		md["quantization"] = scan.Quantization
+	}
+	if scan.TrainedContext > 0 {
+		md["trainedContext"] = scan.TrainedContext
+	}
+	if scan.SizeLabel != "" {
+		md["sizeLabel"] = scan.SizeLabel
+	}
+	if scan.Draft != "" {
+		md["draft"] = scan.Draft
+	}
+	if scan.Spec != "" {
+		md["spec"] = scan.Spec
+	}
+	if scan.Source != "" {
+		md["scanSource"] = scan.Source
+	}
+	return md
+}
+
 // handleListModels serves the OpenAI-compatible model listing: local models
 // (with optional aliases) plus peer models.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +207,15 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		caps config.ModelCapConfig,
 		status string,
 		internalMetadata map[string]any,
+		scan config.ModelScanInfo,
+		contextSource string,
 	) modelRecord {
+		if strings.TrimSpace(name) == "" {
+			name = scan.Name
+		}
+		if strings.TrimSpace(description) == "" {
+			description = scan.Description
+		}
 		rec := modelRecord{
 			ID:          id,
 			Object:      "model",
@@ -191,6 +231,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		rec.ContextWindow = rec.ContextLength
 		if !caps.Empty() {
 			metadata = filterCappedMetadata(metadata)
+		}
+		// A user metadata key always wins over a value inferred from the
+		// command line or the model file.
+		for key, value := range scannedMetadata(scan, contextSource) {
+			if _, userSet := metadata[key]; userSet {
+				continue
+			}
+			internalMetadata[key] = value
 		}
 		llamaSwapMetadata := make(map[string]any, len(metadata)+len(internalMetadata))
 		for key, value := range metadata {
@@ -233,8 +281,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		// Resolved once and reused for the aliases, which describe the same
 		// upstream and must not disagree with the model they point at.
-		caps := s.resolveCapabilities(r.Context(), id, mc)
-		data = append(data, newRecord(id, mc.Name, mc.Description, mc.Metadata, caps, status, internalMetadata))
+		caps, contextSource := s.resolveCapabilitiesWithSource(r.Context(), id, mc)
+		data = append(data, newRecord(id, mc.Name, mc.Description, mc.Metadata, caps, status, internalMetadata, mc.Scanned, contextSource))
 
 		if s.cfg.IncludeAliasesInList {
 			for _, alias := range mc.Aliases {
@@ -254,6 +302,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 						caps,
 						status,
 						aliasMetadata,
+						mc.Scanned,
+						contextSource,
 					))
 				}
 			}
@@ -276,6 +326,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 				config.ModelCapConfig{},
 				"unloaded",
 				map[string]any{"type": "peer", "peerID": peerID},
+				config.ModelScanInfo{},
+				"",
 			))
 		}
 	}
@@ -316,6 +368,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			config.ModelCapConfig{},
 			status,
 			internalMetadata,
+			config.ModelScanInfo{},
+			"",
 		))
 	}
 
@@ -335,6 +389,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 				config.ModelCapConfig{},
 				"unloaded",
 				map[string]any{"type": "profile"},
+				config.ModelScanInfo{},
+				"",
 			))
 		}
 	}

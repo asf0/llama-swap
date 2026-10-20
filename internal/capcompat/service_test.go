@@ -311,6 +311,18 @@ func TestCapcompat_LookupTreatsEmptyCapabilitiesAsMiss(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestCapcompat_ProbedSeesEmptyCapabilities(t *testing.T) {
+	cache := newCountingCache()
+	info := Info{Upstream: "llama-server", Capabilities: config.ModelCapConfig{}}
+	require.NoError(t, cache.Set(context.Background(), store.CacheEntry{Key: "k", Data: mustJSON(t, info)}))
+
+	svc := New(cache, nil)
+	_, found := svc.Lookup(context.Background(), "k")
+	assert.False(t, found)
+	assert.True(t, svc.Probed(context.Background(), "k"))
+	assert.Equal(t, int64(1), cache.gets.Load(), "Probed must use the Lookup memo")
+}
+
 func TestCapcompat_RefreshReplacesMemoizedValue(t *testing.T) {
 	up := newUpstream(t, map[string][]byte{
 		"/v1/models": fixture(t, "llama-server", "v1_models.json"),

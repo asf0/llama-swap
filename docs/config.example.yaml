@@ -135,6 +135,29 @@ unloadTimeout: 10
 # - see issue #1086
 globalConcurrencyLimit: 0
 
+# filters: default request filters inherited by every local model
+# - optional, default: empty dictionary
+# - same shape as models.*.filters (stripParams, setParams, setParamsByID,
+#   setParamsByMatch)
+# - a model's own filters merge on top of these defaults:
+#   - stripParams lists are combined
+#   - setParams maps are merged recursively, with the model's values winning
+#   - setParamsByMatch rules from the model run after these defaults, so model
+#     rules win when both match
+#   - setParamsByID entries are merged per requested ID, with model params winning
+# - model-level setParamsByID keys still create aliases; global keys here do not
+# - set models.*.filters.inherit: false to use only that model's filters
+# - peers never inherit these filters
+# filters:
+#   stripParams: "temperature, top_p"
+#   setParams:
+#     top_k: 40
+#   setParamsByMatch:
+#     - key: reasoning_effort
+#       match: low
+#       set:
+#         reasoning_budget_tokens: 2048
+
 # macros: a dictionary of string substitutions
 # - optional, default: empty dictionary
 # - macros are reusable snippets
@@ -469,7 +492,13 @@ models:
     # filters: a dictionary of filter settings
     # - optional, default: empty dictionary
     # - same capabilities as peer filters (stripParams, setParams, setParamsByMatch)
+    # - these merge on top of the top-level filters, which are inherited by default
     filters:
+      # inherit: use the top-level filters as defaults for this model
+      # - optional, default: true
+      # - set to false to use only this model's filters and ignore the top-level ones
+      # inherit: false
+
       # stripParams: a comma separated list of parameters to remove from the request
       # - optional, default: ""
       # - useful for server side enforcement of sampling parameters

@@ -133,6 +133,11 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 
 	for _, modelId := range modelIds {
 		modelConfig := config.Models[modelId]
+
+		// Pre-load inference. Best-effort and silent: an unreadable model
+		// file or an unusual command simply leaves fields empty.
+		scanModelConfig(&modelConfig)
+
 		if modelConfig.HealthCheckTimeout <= 0 {
 			modelConfig.HealthCheckTimeout = config.HealthCheckTimeout
 		} else if modelConfig.HealthCheckTimeout < 15 {
@@ -182,6 +187,12 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			}
 			config.aliases[key] = modelId
 			modelConfig.Aliases = append(modelConfig.Aliases, key)
+		}
+
+		// Inherit the top-level filters after auto-registering setParamsByID
+		// aliases, so a global key is not turned into an alias for every model.
+		if modelConfig.Filters.InheritsGlobal() {
+			modelConfig.Filters.Filters = config.Filters.Merge(modelConfig.Filters.Filters)
 		}
 
 		if _, err := url.Parse(modelConfig.Proxy); err != nil {
@@ -334,10 +345,16 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	return config, nil
 }
 
-// validateSetParamsByMatch checks every setParamsByMatch rule on models and
-// peers. Macros inside rule values are already expanded and validated before
-// the typed decode, so only the rule shape is checked here.
+// validateSetParamsByMatch checks every setParamsByMatch rule on the top-level
+// defaults, models and peers. Macros inside rule values are already expanded
+// and validated before the typed decode, so only the rule shape is checked
+// here.
 func validateSetParamsByMatch(config Config) error {
+	for i, rule := range config.Filters.SetParamsByMatch {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("filters.setParamsByMatch[%d]: %w", i, err)
+		}
+	}
 	for modelID, modelConfig := range config.Models {
 		for i, rule := range modelConfig.Filters.SetParamsByMatch {
 			if err := rule.Validate(); err != nil {

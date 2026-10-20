@@ -107,6 +107,90 @@ func (r MatchRule) SanitizedSet() (map[string]any, []string) {
 	return result, keys
 }
 
+// Merge returns the effective filters for a local model. f holds the
+// top-level defaults and override holds the model's own filters. The receiver
+// and override are not mutated.
+//
+// stripParams lists are combined; setParams maps are merged recursively with
+// override winning on shared keys; setParamsByMatch rules are appended after
+// the defaults so a model rule wins when both match; setParamsByID entries are
+// merged per requested ID with override winning on shared params.
+func (f Filters) Merge(override Filters) Filters {
+	return Filters{
+		StripParams:      mergeStripParams(f.StripParams, override.StripParams),
+		SetParams:        mergeAnyMaps(f.SetParams, override.SetParams),
+		SetParamsByID:    mergeSetParamsByID(f.SetParamsByID, override.SetParamsByID),
+		SetParamsByMatch: mergeMatchRules(f.SetParamsByMatch, override.SetParamsByMatch),
+	}
+}
+
+// mergeStripParams joins two comma-separated lists. Duplicates, whitespace and
+// empty entries are handled later by SanitizedStripParams.
+func mergeStripParams(base, override string) string {
+	switch {
+	case base == "":
+		return override
+	case override == "":
+		return base
+	default:
+		return base + ", " + override
+	}
+}
+
+// mergeAnyMaps deep merges override into base. Nested map[string]any values
+// merge recursively so an override can replace one nested key without
+// discarding its siblings. Any other override value replaces the base value.
+func mergeAnyMaps(base, override map[string]any) map[string]any {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	merged := make(map[string]any, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		if baseValue, ok := merged[key].(map[string]any); ok {
+			if overrideValue, ok := value.(map[string]any); ok {
+				merged[key] = mergeAnyMaps(baseValue, overrideValue)
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+// mergeSetParamsByID merges the outer maps and deep-merges the params for IDs
+// present in both, with the override's params winning on shared keys.
+func mergeSetParamsByID(base, override map[string]map[string]any) map[string]map[string]any {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	merged := make(map[string]map[string]any, len(base)+len(override))
+	for id, params := range base {
+		merged[id] = params
+	}
+	for id, params := range override {
+		merged[id] = mergeAnyMaps(merged[id], params)
+	}
+	return merged
+}
+
+// mergeMatchRules appends the override's rules after the base rules. Every
+// matching rule applies in order, so later (model) rules win on shared keys.
+func mergeMatchRules(base, override []MatchRule) []MatchRule {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	merged := make([]MatchRule, 0, len(base)+len(override))
+	merged = append(merged, base...)
+	merged = append(merged, override...)
+	return merged
+}
+
 // SanitizedStripParams returns a sorted list of parameters to strip,
 // with duplicates, empty strings, and protected params removed
 func (f Filters) SanitizedStripParams() []string {

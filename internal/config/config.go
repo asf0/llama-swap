@@ -197,6 +197,11 @@ type Config struct {
 	Profiles  map[string]ProfileConfig  `yaml:"profiles"`
 	Selectors map[string]SelectorConfig `yaml:"selectors"`
 
+	// Filters holds request filters inherited by every local model. A model
+	// can opt out with models.*.filters.inherit: false, or merge its own
+	// settings on top of these defaults. Peers never inherit them.
+	Filters Filters `yaml:"filters"`
+
 	// GlobalConcurrencyLimit caps the number of inference requests served at
 	// once across all models. 0 (default) means no limit. See issue #1086.
 	GlobalConcurrencyLimit int `yaml:"globalConcurrencyLimit"`

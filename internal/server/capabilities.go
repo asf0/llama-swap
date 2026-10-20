@@ -69,19 +69,50 @@ func (s *Server) refreshCapabilities(modelID string, mc config.ModelConfig) {
 
 // resolveCapabilities returns the capabilities to advertise for a local model:
 // what the config sets, with anything it leaves unset filled in from the last
-// successful probe.
+// successful probe, then from pre-load inference.
 //
 // Configured values win field by field, so a model that hand-sets one field
 // still benefits from discovery for the rest. A model with
 // capabilities.disableAuto gets exactly what its config says.
 func (s *Server) resolveCapabilities(ctx context.Context, modelID string, mc config.ModelConfig) config.ModelCapConfig {
+	caps, _ := s.resolveCapabilitiesWithSource(ctx, modelID, mc)
+	return caps
+}
+
+// resolveCapabilitiesWithSource also reports where the advertised context
+// length came from: "config", "discovered" or "cmd". The source is empty when
+// nothing supplied a context length.
+func (s *Server) resolveCapabilitiesWithSource(ctx context.Context, modelID string, mc config.ModelConfig) (config.ModelCapConfig, string) {
 	caps := mc.Capabilities
+	source := ""
+	if caps.Context > 0 {
+		source = "config"
+	}
 	if caps.DisableAuto {
-		return caps
+		return caps, source
 	}
-	auto, found := s.capcompat.Lookup(ctx, capcompat.LocalKey(modelID, mc))
-	if !found {
-		return caps
+
+	key := capcompat.LocalKey(modelID, mc)
+	auto, found := s.capcompat.Lookup(ctx, key)
+	if found {
+		if caps.Context == 0 && auto.Context > 0 {
+			source = "discovered"
+		}
+		caps = caps.Merge(auto)
 	}
-	return caps.Merge(auto)
+
+	// Inference is the last resort. It fills only fields still at their zero
+	// value after the config and any discovered answer.
+	inferred := mc.Inferred
+	if found || s.capcompat.Probed(ctx, key) {
+		// A capability probe is authoritative for tools once it has run.
+		// Tools is a plain bool, so a discovered false cannot override an
+		// inferred true through Merge; clear inference explicitly instead.
+		inferred.Tools = false
+	}
+	if caps.Context == 0 && inferred.Context > 0 {
+		source = "cmd"
+	}
+	caps = caps.Merge(inferred)
+	return caps, source
 }
