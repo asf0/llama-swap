@@ -6,6 +6,7 @@ import {
   matchesCapabilities,
   matchesModel,
   modelServerPath,
+  modelOpenPath,
   MODEL_GROUP_LOCAL,
   MODEL_GROUP_MATCHING,
   MODEL_GROUP_PEERS,
@@ -37,6 +38,27 @@ describe("modelServerPath", () => {
 
   it("uses the encoded upstream endpoint for other models", () => {
     expect(modelServerPath("org/model name")).toBe("/upstream/org%2Fmodel%20name/");
+  });
+});
+
+describe("modelOpenPath", () => {
+  it("uses the configured UI URL when the model has one", () => {
+    const model = makeModel({ id: "hipfire", uiUrl: "http://host:19095/ui/" });
+    expect(modelOpenPath(model)).toBe("http://host:19095/ui/");
+  });
+
+  it("keeps a root-relative configured UI URL", () => {
+    const model = makeModel({ id: "backend", uiUrl: "/backend/ui/" });
+    expect(modelOpenPath(model)).toBe("/backend/ui/");
+  });
+
+  it("falls back to the model server path", () => {
+    const model = makeModel({ id: "org/model name" });
+    expect(modelOpenPath(model)).toBe(modelServerPath("org/model name"));
+  });
+
+  it("falls back to the reserved endpoint path", () => {
+    expect(modelOpenPath(makeModel({ id: "comfyui_auto" }))).toBe("/comfyui/");
   });
 });
 

@@ -30,6 +30,8 @@ type apiModel struct {
 	Aliases       []string       `json:"aliases,omitempty"`
 	Capabilities  map[string]any `json:"capabilities,omitempty"`
 	ContextLength int            `json:"context_length,omitempty"`
+	// UiURL is the backend's own UI, linked from the dashboard when set.
+	UiURL string `json:"uiUrl,omitempty"`
 	// ReadySince is when the model last became ready (RFC 3339). Only set
 	// while the model is ready.
 	ReadySince string `json:"readySince,omitempty"`
@@ -174,6 +176,7 @@ func (s *Server) modelStatus() []apiModel {
 			Capabilities:    capsMap,
 			Modalities:      modalities,
 			ContextLength:   ctxLen,
+			UiURL:           mc.UiURL,
 			ReadySince:      readySince,
 			UptimeMs:        uptimeMs,
 			LoadingProgress: loading.Progress,

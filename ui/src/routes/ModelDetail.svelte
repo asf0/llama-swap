@@ -11,7 +11,7 @@
   import ModelActivityTab from "../components/model/ModelActivityTab.svelte";
   import ModelLogsTab from "../components/model/ModelLogsTab.svelte";
   import ModelDetailsTab from "../components/model/ModelDetailsTab.svelte";
-  import { modelServerPath } from "../lib/modelUtils";
+  import { modelOpenPath } from "../lib/modelUtils";
   import { formatAbsoluteTime, formatUptime } from "../lib/format";
 
   let modelId = $derived($params?.id ?? "");
@@ -85,12 +85,12 @@
           <div class="flex shrink-0 items-center gap-2">
             {#if !model.peerID}
               <a
-                href={modelServerPath(resolvedId)}
+                href={modelOpenPath(model)}
                 target="_blank"
                 rel="noopener noreferrer"
                 class="text-muted-foreground hover:text-foreground"
-                title="Open model server"
-                aria-label="Open model server"
+                title="Open model UI"
+                aria-label="Open model UI"
               >
                 <ExternalLink class="size-4" />
               </a>

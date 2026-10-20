@@ -23,7 +23,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
   import { PowerOff, Loader2, ExternalLink, Boxes, Pause, Play, ChevronDown, SlidersHorizontal } from "@lucide/svelte";
-  import { modelServerPath } from "../lib/modelUtils";
+  import { modelOpenPath } from "../lib/modelUtils";
 
   let unloadingAll = $state(false);
   let togglingPause = $state(false);
@@ -143,12 +143,12 @@
     {/if}
     {#if !model.peerID}
       <a
-        href={modelServerPath(model.id)}
+        href={modelOpenPath(model)}
         target="_blank"
         rel="noopener noreferrer"
         class="text-muted-foreground hover:text-foreground"
-        title="Open model server"
-        aria-label="Open model server"
+        title="Open model UI"
+        aria-label="Open model UI"
       >
         <ExternalLink class="size-4" />
       </a>
