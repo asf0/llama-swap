@@ -4,7 +4,7 @@ summary: Global and per-model macros, environment variable macros, and the order
 category: guides
 tags: [macros, env, dry, substitution]
 config_keys: [macros, models.*.macros]
-updated: 2026-08-25
+updated: 2026-10-01
 ---
 
 # Reusing configuration with macros
@@ -55,7 +55,7 @@ models:
 
 - **Names**: under 64 characters, matching `^[a-zA-Z0-9_-]+$`. Not `PID`,
   `PORT` or `MODEL_ID` — those are reserved.
-- **Values** may be strings, numbers or booleans.
+- **Values** may be strings, numbers, booleans, maps or lists.
 - **Macros may reference other macros, but only ones defined before them.** A
   macro referring to a later definition does not resolve. This is the most
   common macro bug — reorder the definitions.
@@ -78,6 +78,30 @@ models:
 
 This matters for `metadata` and `filters.setParams`, where a stringified number
 may not be what the upstream expects.
+
+## Structured macros share whole blocks
+
+A macro value may be a map or a list, letting one definition back several
+models instead of copy-pasting a block:
+
+```yaml
+macros:
+  "reasoning_rules":
+    - key: reasoning_effort
+      match: none
+      set: { chat_template_kwargs: { enable_thinking: false } }
+    - key: reasoning_effort
+      match: high
+      set: { chat_template_kwargs: { enable_thinking: true } }
+
+models:
+  a: { filters: { setParamsByMatch: ${reasoning_rules} } }
+  b: { filters: { setParamsByMatch: ${reasoning_rules} } }
+```
+
+Structured macros are only valid **as a whole value** — the line must be just
+`${name}`. Interpolating one into a larger string (`cmd: "run ${rules}"`) is a
+load-time error, as is referencing a map or list where a scalar is expected.
 
 ## Environment variable macros
 
