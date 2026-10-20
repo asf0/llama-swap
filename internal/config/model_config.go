@@ -3,7 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
+	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -130,6 +134,86 @@ type CompatConfig struct {
 	IgnoreWebsockets bool `yaml:"ignoreWebsockets"`
 }
 
+// maxCheckReadyBodyLen is the largest health check body inspected by a
+// checkReady predicate, mirroring the progress parser's limit. A readiness
+// document is small; anything much bigger is not one.
+const maxCheckReadyBodyLen = 64 * 1024
+
+// CheckReadyConfig is an optional predicate applied to a health check response
+// whose HTTP status is already 200. It lets an upstream that answers 200 while
+// still loading report readiness in its body instead of its status code.
+//
+// Exactly one of JSONPath and BodyRegex must be set.
+type CheckReadyConfig struct {
+	// JSONPath is a gjson path evaluated against the response body. With no
+	// Equals or NotEquals the path must exist and be neither null nor false,
+	// which is how "field present and non-null" is expressed.
+	JSONPath string `yaml:"jsonPath" json:"jsonPath,omitempty"`
+	// Equals requires the JSONPath value's string form to match this scalar.
+	// A null expected value is not supported: YAML cannot distinguish an
+	// absent key from an explicit null.
+	Equals any `yaml:"equals" json:"equals,omitempty"`
+	// NotEquals requires the JSONPath value's string form to differ from this
+	// scalar. It may be null.
+	NotEquals any `yaml:"notEquals" json:"notEquals,omitempty"`
+	// BodyRegex makes readiness depend on a regular expression matching the
+	// raw response body. It is an alternative to JSONPath.
+	BodyRegex string `yaml:"bodyRegex" json:"bodyRegex,omitempty"`
+
+	regex *regexp.Regexp
+}
+
+// UnmarshalYAML compiles bodyRegex while decoding so an invalid expression is
+// reported as a config error instead of failing silently at runtime.
+func (c *CheckReadyConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type rawCheckReady CheckReadyConfig
+	var raw rawCheckReady
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	if raw.BodyRegex != "" {
+		re, err := regexp.Compile(raw.BodyRegex)
+		if err != nil {
+			return fmt.Errorf("checkReady.bodyRegex: invalid regular expression %q: %w", raw.BodyRegex, err)
+		}
+		raw.regex = re
+	}
+	*c = CheckReadyConfig(raw)
+	return nil
+}
+
+// Matches reports whether body satisfies the predicate. A nil config always
+// matches, so callers can use it without a separate nil check.
+func (c *CheckReadyConfig) Matches(body []byte) bool {
+	if c == nil {
+		return true
+	}
+	if len(body) > maxCheckReadyBodyLen {
+		return false
+	}
+	if c.regex != nil {
+		return c.regex.Match(body)
+	}
+	if c.JSONPath == "" {
+		return false
+	}
+	// JSONPath-style "$.model" is the documented spelling. gjson paths are
+	// relative to the root, so drop the leading "$" and separator if present.
+	path := strings.TrimPrefix(c.JSONPath, "$")
+	path = strings.TrimPrefix(path, ".")
+	result := gjson.GetBytes(body, path)
+	if !result.Exists() {
+		return false
+	}
+	if c.Equals == nil && c.NotEquals == nil {
+		return result.Type != gjson.Null && result.Type != gjson.False
+	}
+	if c.Equals != nil {
+		return result.String() == fmt.Sprint(c.Equals)
+	}
+	return result.String() != fmt.Sprint(c.NotEquals)
+}
+
 type ModelConfig struct {
 	Cmd           string   `yaml:"cmd"`
 	CmdStop       string   `yaml:"cmdStop"`
@@ -177,8 +261,13 @@ type ModelConfig struct {
 	// Capabilities defines what modalities and features the model supports.
 	Capabilities ModelCapConfig `yaml:"capabilities"`
 
-	// Copy of HealthCheckTimeout from global config
+	// HealthCheckTimeout overrides the global healthCheckTimeout for this
+	// model when non-zero. Config loading fills in the global value and clamps
+	// the effective value to the 15-second minimum.
 	HealthCheckTimeout int `yaml:"healthCheckTimeout"`
+
+	// CheckReady adds a body predicate to a 200 health check response.
+	CheckReady *CheckReadyConfig `yaml:"checkReady"`
 }
 
 func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {

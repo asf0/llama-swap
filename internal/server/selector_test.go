@@ -384,7 +384,7 @@ func TestServer_Selector_ModelListings(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, "Public Model", public.Name)
 	assert.Equal(t, "Public selector", public.Description)
-	assert.Equal(t, "loaded", public.Status["value"])
+	assert.Equal(t, "starting", public.Status["value"])
 	require.Contains(t, public.Meta, "llamaswap")
 	metadata, ok := public.Meta["llamaswap"].(map[string]any)
 	require.True(t, ok)

@@ -3,7 +3,7 @@ title: Writing the cmd for a model
 summary: Minimal model config using cmd and ${PORT}, plus proxy, checkEndpoint loading progress, Docker, and llama-server's --jinja flag.
 category: guides
 tags: [cmd, port, proxy, model-id, check-endpoint, health-check, loading-progress, tools, tool-calling, jinja, llama-server, minimal, configuration, getting-started, docker, container]
-config_keys: [models.*.cmd, models.*.proxy, models.*.checkEndpoint, models.*.healthCheckTimeout, models.*.env, startPort, healthCheckTimeout]
+config_keys: [models.*.cmd, models.*.proxy, models.*.checkEndpoint, models.*.healthCheckTimeout, models.*.checkReady, models.*.env, startPort, healthCheckTimeout]
 updated: 2026-10-20
 ---
 
@@ -90,6 +90,37 @@ Set `checkEndpoint: "none"` to skip health checking entirely — llama-swap then
 forwards the first request immediately, which usually means it fails while the
 server is still loading weights. Only use it for servers with no usable
 readiness endpoint.
+
+### `checkReady`: a 200 is not always ready
+
+Some servers answer the health check with HTTP 200 throughout loading and put
+the real state in the body. `checkReady` adds a predicate that must also pass:
+
+```yaml
+checkEndpoint: /health
+checkReady:
+  jsonPath: "$.model"       # ready when present and non-null
+  # equals: "qwen3.8:flash-next"
+  # notEquals: null
+```
+
+With `jsonPath` and no `equals`/`notEquals`, the field must exist and be neither
+null nor false. That is the way to express "field present and non-null";
+`equals: null` is not supported because YAML cannot tell an absent key from an
+explicit null. Use `bodyRegex` instead of `jsonPath` when the body is not JSON:
+
+```yaml
+checkReady:
+  bodyRegex: '"loading_model"\s*:\s*null'
+```
+
+Set exactly one of `jsonPath` and `bodyRegex`. `equals`/`notEquals` require
+`jsonPath` and cannot be combined. `checkReady` also requires a real
+`checkEndpoint`; it cannot be used with `none`.
+
+While the predicate fails, llama-swap keeps polling, still shows any
+`progress`/`message` (or `loading_model`) from the body, and applies
+`healthCheckTimeout` (including a per-model override) as usual.
 
 ### Per-model startup timeout
 

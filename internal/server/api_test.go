@@ -172,6 +172,110 @@ func TestServer_HandleListModels_Status(t *testing.T) {
 	}
 }
 
+func TestServer_HandleListModels_StartingLoading(t *testing.T) {
+	progress := 0.42
+	local := newStubRouter(nil, "")
+	local.running = map[string]process.ProcessState{
+		"starting-model": process.StateStarting,
+		"ready-model":    process.StateReady,
+		"stopping-model": process.StateStopping,
+	}
+	local.loading = map[string]*process.LoadingProgress{
+		"starting-model": {Progress: &progress, Message: "loading tensors"},
+	}
+	s := newTestServer(local, newStubRouter(nil, ""))
+	s.cfg = config.Config{
+		IncludeAliasesInList: true,
+		Models: map[string]config.ModelConfig{
+			"starting-model": {Aliases: []string{"starting-alias"}},
+			"ready-model":    {},
+			"stopping-model": {},
+			"unloaded-model": {},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	var resp struct {
+		Data []modelRecord `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	records := make(map[string]modelRecord, len(resp.Data))
+	for _, m := range resp.Data {
+		records[m.ID] = m
+	}
+
+	wantStatus := map[string]string{
+		"starting-model": "starting",
+		"starting-alias": "starting",
+		"ready-model":    "loaded",
+		"stopping-model": "stopping",
+		"unloaded-model": "unloaded",
+	}
+	for id, want := range wantStatus {
+		if got, _ := records[id].Status["value"].(string); got != want {
+			t.Errorf("%s status = %q, want %q", id, got, want)
+		}
+	}
+
+	for _, id := range []string{"starting-model", "starting-alias"} {
+		meta, ok := records[id].Meta["llamaswap"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s meta.llamaswap missing: %+v", id, records[id].Meta)
+		}
+		if got := meta["loadingProgress"]; got != 0.42 {
+			t.Errorf("%s loadingProgress = %v, want 0.42", id, got)
+		}
+		if got := meta["loadingMessage"]; got != "loading tensors" {
+			t.Errorf("%s loadingMessage = %v, want loading tensors", id, got)
+		}
+	}
+	if meta, ok := records["ready-model"].Meta["llamaswap"].(map[string]any); ok {
+		if _, found := meta["loadingProgress"]; found {
+			t.Error("ready model should not carry loadingProgress")
+		}
+	}
+}
+
+func TestServer_Running_StartingLoading(t *testing.T) {
+	progress := 0.75
+	local := newStubRouter(nil, "")
+	local.running = map[string]process.ProcessState{"m1": process.StateStarting}
+	local.loading = map[string]*process.LoadingProgress{
+		"m1": {Progress: &progress, Message: "loading weights"},
+	}
+	s := newTestServer(local, newStubRouter(nil, ""))
+	s.cfg = config.Config{Models: map[string]config.ModelConfig{
+		"m1": {Cmd: "llama-server", Proxy: "http://localhost:9999"},
+	}}
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/running", nil))
+
+	var resp struct {
+		Running []runningModel `json:"running"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%q", err, w.Body.String())
+	}
+	if len(resp.Running) != 1 {
+		t.Fatalf("running=%v want 1 entry", resp.Running)
+	}
+	got := resp.Running[0]
+	if got.State != "starting" {
+		t.Errorf("state = %q, want starting", got.State)
+	}
+	if got.LoadingProgress == nil || *got.LoadingProgress != 0.75 {
+		t.Errorf("loadingProgress = %v, want 0.75", got.LoadingProgress)
+	}
+	if got.LoadingMessage != "loading weights" {
+		t.Errorf("loadingMessage = %q, want loading weights", got.LoadingMessage)
+	}
+}
+
 func TestServer_FindModelInPath(t *testing.T) {
 	cfg := config.Config{Models: map[string]config.ModelConfig{
 		"author":       {},

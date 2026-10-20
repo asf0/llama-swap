@@ -311,6 +311,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		return Config{}, err
 	}
 
+	if err := validateCheckReady(config); err != nil {
+		return Config{}, err
+	}
+
 	if err := validateSelectors(config); err != nil {
 		return Config{}, err
 	}
@@ -342,6 +346,34 @@ func validateSetParamsByMatch(config Config) error {
 			if err := rule.Validate(); err != nil {
 				return fmt.Errorf("peers.%s.filters.setParamsByMatch[%d]: %w", peerID, i, err)
 			}
+		}
+	}
+	return nil
+}
+
+// validateCheckReady checks every model's optional readiness predicate. The
+// predicate only makes sense when a check endpoint is polled, exactly one
+// predicate type is configured, and scalar comparison is applied to a JSON path.
+func validateCheckReady(config Config) error {
+	for modelID, modelConfig := range config.Models {
+		cr := modelConfig.CheckReady
+		if cr == nil {
+			continue
+		}
+		endpoint := strings.TrimSpace(modelConfig.CheckEndpoint)
+		if endpoint == "" || endpoint == "none" {
+			return fmt.Errorf("model %s: checkReady requires a checkEndpoint other than 'none'", modelID)
+		}
+		hasJSONPath := strings.TrimSpace(cr.JSONPath) != ""
+		hasBodyRegex := strings.TrimSpace(cr.BodyRegex) != ""
+		if hasJSONPath == hasBodyRegex {
+			return fmt.Errorf("model %s: checkReady requires exactly one of jsonPath or bodyRegex", modelID)
+		}
+		if !hasJSONPath && (cr.Equals != nil || cr.NotEquals != nil) {
+			return fmt.Errorf("model %s: checkReady.equals and checkReady.notEquals require jsonPath", modelID)
+		}
+		if cr.Equals != nil && cr.NotEquals != nil {
+			return fmt.Errorf("model %s: checkReady cannot set both equals and notEquals", modelID)
 		}
 	}
 	return nil

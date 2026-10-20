@@ -502,6 +502,52 @@
                         "default": 0,
                         "description": "Number of seconds to wait for this model to be ready, overriding the global healthCheckTimeout. 0 or omitted uses the global value. Values below 15 are clamped to 15. As with the global setting, a change in reported loading progress restarts the countdown."
                     },
+                    "checkReady": {
+                        "type": "object",
+                        "properties": {
+                            "jsonPath": {
+                                "type": "string",
+                                "description": "gjson path evaluated against a 200 response body. The model is ready only when the path exists and is neither null nor false, unless equals or notEquals is set. Use jsonPath: \"$.model\" to mean 'field present and non-null'."
+                            },
+                            "equals": {
+                                "oneOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "number"
+                                    },
+                                    {
+                                        "type": "boolean"
+                                    }
+                                ],
+                                "description": "Require the jsonPath value's string form to equal this scalar. A null value is not supported; use jsonPath alone for a non-null check."
+                            },
+                            "notEquals": {
+                                "oneOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "number"
+                                    },
+                                    {
+                                        "type": "boolean"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Require the jsonPath value's string form to differ from this scalar. null is allowed, but jsonPath alone is the recommended non-null check."
+                            },
+                            "bodyRegex": {
+                                "type": "string",
+                                "description": "Regular expression matched against a 200 response body. Alternative to jsonPath; exactly one of jsonPath and bodyRegex may be set."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "description": "Predicate applied to a health check response that already returned HTTP 200. The model keeps polling until the predicate passes. Requires a real checkEndpoint and exactly one of jsonPath or bodyRegex."
+                    },
                     "ttl": {
                         "type": "integer",
                         "minimum": -1,

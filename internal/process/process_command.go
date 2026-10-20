@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -592,6 +593,7 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 	deadline := time.Now().Add(healthCheckTimeout)
 	var lastReport *LoadingProgress
 	var lastProgress *float64
+	loggedPredicateWait := false
 	for {
 		select {
 		case <-startCtx.Done():
@@ -615,15 +617,23 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 		rr := httptest.NewRecorder()
 		reverseProxy.ServeHTTP(rr, req)
 		resp := rr.Result()
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
+
+		statusOK := resp.StatusCode == http.StatusOK
+		predicateOK := p.config.CheckReady == nil || p.config.CheckReady.Matches(body)
+		if statusOK && predicateOK {
 			p.proxyLogger.Infof("<%s> Health check passed on %s%s", p.id, p.config.Proxy, p.config.CheckEndpoint)
 			break
 		} else if startCtx.Err() != nil {
 			return abort(ErrStartAborted)
 		}
+		if statusOK && !predicateOK && !loggedPredicateWait {
+			loggedPredicateWait = true
+			p.proxyLogger.Infof("<%s> health check returned 200 but checkReady is not satisfied yet", p.id)
+		}
 
-		if lp, ok := parseLoadingProgress(rr.Body.Bytes()); ok {
+		if lp, ok := parseLoadingProgress(body); ok {
 			if lp.Progress != nil && (lastProgress == nil || *lp.Progress != *lastProgress) {
 				lastProgress = lp.Progress
 				deadline = time.Now().Add(healthCheckTimeout)

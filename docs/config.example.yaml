@@ -417,6 +417,18 @@ models:
     # - values below 15 are clamped to 15
     # healthCheckTimeout: 900
 
+    # checkReady: require a body predicate in addition to HTTP 200
+    # - optional, requires checkEndpoint and exactly one of jsonPath/bodyRegex
+    # - while the predicate fails, llama-swap keeps polling and still parses
+    #   loading progress from the response body
+    # - jsonPath alone means "the field exists and is not null/false"
+    # - equals/notEquals may only be used with jsonPath, and not both at once
+    # checkReady:
+    #   jsonPath: "$.model"
+    #   # equals: "qwen3.8:flash-next"
+    #   # notEquals: null
+    #   # bodyRegex: '"loading_model"\s*:\s*null'
+
     # ttl: automatically unload the model after ttl seconds
     # - optional, default: -1 (use global default)
     # - ttl values must be a value greater than or equal to 0

@@ -138,14 +138,35 @@ func filterCappedMetadata(md map[string]any) map[string]any {
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
 	data := make([]modelRecord, 0, len(s.cfg.Models)+len(s.cfg.Selectors))
-	running := s.local.RunningModels()
+	running := s.local.RunningStatus()
 	modelIDs := make(map[string]struct{})
 
-	modelStatus := func(id string) string {
-		if _, ok := running[id]; ok {
-			return "loaded"
+	// modelStatus maps process state to the /v1/models status value and, while
+	// a model is starting, returns the upstream's loading progress as metadata.
+	modelStatus := func(id string) (string, map[string]any) {
+		st, ok := running[id]
+		if !ok {
+			return "unloaded", nil
 		}
-		return "unloaded"
+		switch st.State {
+		case process.StateStarting:
+			meta := make(map[string]any)
+			if st.Loading != nil {
+				if st.Loading.Progress != nil {
+					meta["loadingProgress"] = *st.Loading.Progress
+				}
+				if st.Loading.Message != "" {
+					meta["loadingMessage"] = st.Loading.Message
+				}
+			}
+			return "starting", meta
+		case process.StateStopping:
+			return "stopping", nil
+		case process.StateReady:
+			return "loaded", nil
+		default:
+			return "loaded", nil
+		}
 	}
 
 	newRecord := func(
@@ -199,8 +220,11 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		if mc.Unlisted {
 			continue
 		}
-		status := modelStatus(id)
+		status, loadingMeta := modelStatus(id)
 		internalMetadata := map[string]any{"type": "model"}
+		for key, value := range loadingMeta {
+			internalMetadata[key] = value
+		}
 		if len(mc.Aliases) > 0 {
 			internalMetadata["aliases"] = mc.Aliases
 		}
@@ -212,6 +236,10 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.IncludeAliasesInList {
 			for _, alias := range mc.Aliases {
 				if alias := strings.TrimSpace(alias); alias != "" {
+					aliasMetadata := map[string]any{"type": "alias", "modelID": id}
+					for key, value := range loadingMeta {
+						aliasMetadata[key] = value
+					}
 					data = append(data, newRecord(
 						alias,
 						mc.Name,
@@ -219,7 +247,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 						mc.Metadata,
 						caps,
 						status,
-						map[string]any{"type": "alias", "modelID": id},
+						aliasMetadata,
 					))
 				}
 			}
@@ -255,12 +283,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		for _, target := range selector.Targets {
 			modelID, local := s.cfg.RealModelName(target)
 			if local {
-				state := running[modelID]
-				if state == process.StateReady || state == process.StateStarting {
+				switch running[modelID].State {
+				case process.StateReady:
 					status = "loaded"
+				case process.StateStarting:
+					status = "starting"
 				}
 			}
-			if selector.Strategy == config.SelectorStrategyPin || status == "loaded" {
+			if selector.Strategy == config.SelectorStrategyPin || status == "loaded" || status == "starting" {
 				break
 			}
 		}
@@ -326,13 +356,15 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 // runningModel is one entry in the /running listing.
 type runningModel struct {
-	Model       string `json:"model"`
-	State       string `json:"state"`
-	Cmd         string `json:"cmd"`
-	Proxy       string `json:"proxy"`
-	TTL         int    `json:"ttl"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Model           string   `json:"model"`
+	State           string   `json:"state"`
+	Cmd             string   `json:"cmd"`
+	Proxy           string   `json:"proxy"`
+	TTL             int      `json:"ttl"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	LoadingProgress *float64 `json:"loadingProgress,omitempty"`
+	LoadingMessage  string   `json:"loadingMessage,omitempty"`
 }
 
 // handleUnload stops every running local process. Peer models are remote and
@@ -346,19 +378,24 @@ func (s *Server) handleUnload(w http.ResponseWriter, r *http.Request) {
 // handleRunning lists local processes that are not stopped, joining each model
 // ID against its config for the cmd/proxy/ttl/name/description metadata.
 func (s *Server) handleRunning(w http.ResponseWriter, r *http.Request) {
-	states := s.local.RunningModels()
+	states := s.local.RunningStatus()
 	list := make([]runningModel, 0, len(states))
-	for id, state := range states {
+	for id, st := range states {
 		mc := s.cfg.Models[id]
-		list = append(list, runningModel{
+		entry := runningModel{
 			Model:       id,
-			State:       string(state),
+			State:       string(st.State),
 			Cmd:         mc.Cmd,
 			Proxy:       mc.Proxy,
 			TTL:         mc.UnloadAfter,
 			Name:        mc.Name,
 			Description: mc.Description,
-		})
+		}
+		if st.State == process.StateStarting && st.Loading != nil {
+			entry.LoadingProgress = st.Loading.Progress
+			entry.LoadingMessage = st.Loading.Message
+		}
+		list = append(list, entry)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Model < list[j].Model })
 
