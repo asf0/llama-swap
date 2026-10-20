@@ -3,7 +3,11 @@
 package perf
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,5 +81,65 @@ func TestParseRocmSmiLine_InvalidLines(t *testing.T) {
 			stat := parseRocmSmiLine(tt.header, tt.line)
 			assert.Nil(t, stat)
 		})
+	}
+}
+
+func fakeAmdSmi(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	metricPath := filepath.Join(dir, "metric.json")
+	staticPath := filepath.Join(dir, "static.json")
+	require.NoError(t, os.WriteFile(metricPath, []byte(amdSmiApuMetricJSON), 0o644))
+	require.NoError(t, os.WriteFile(staticPath, []byte(amdSmiApuStaticJSON), 0o644))
+
+	script := "#!/bin/sh\ncase \"$1\" in\n" +
+		"static) cat '" + staticPath + "' ;;\n" +
+		"metric) cat '" + metricPath + "' ;;\n" +
+		"esac\n"
+
+	exe := filepath.Join(dir, "amd-smi")
+	require.NoError(t, os.WriteFile(exe, []byte(script), 0o755))
+	return dir
+}
+
+func TestTryAmdSmi_NoTool(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	ch, err := tryAmdSmi(context.Background(), time.Second, newTestLogger())
+
+	assert.ErrorIs(t, err, ErrNoGpuTool)
+	assert.Nil(t, ch)
+}
+
+func TestTryAmdSmi_SamplesAndClosesOnCancel(t *testing.T) {
+	dir := fakeAmdSmi(t)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := tryAmdSmi(ctx, 10*time.Millisecond, newTestLogger())
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+
+	select {
+	case stats := <-ch:
+		require.Len(t, stats, 1)
+		assert.Equal(t, "AMD Radeon 8060S Graphics", stats[0].Name)
+		assert.Equal(t, 126976, stats[0].MemTotalMB)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for amd-smi sample")
+	}
+
+	cancel()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("collector channel did not close after cancel")
+		}
 	}
 }

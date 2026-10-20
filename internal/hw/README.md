@@ -110,7 +110,7 @@ missing fields. Put the most authoritative probe first when adding a new probe.
 
 | Platform | Environment and memory | Accelerators |
 | --- | --- | --- |
-| Linux | `gopsutil`, `/proc/zoneinfo`, WSL markers, virtualization metadata, `systemd-detect-virt`, container markers, cgroup memory limits | `nvidia-smi`, `rocm-smi`, AMD KFD topology, `xpu-smi` (Intel), and DRM/sysfs |
+| Linux | `gopsutil`, `/proc/zoneinfo`, WSL markers, virtualization metadata, `systemd-detect-virt`, container markers, cgroup memory limits | `nvidia-smi`, `rocm-smi`, AMD KFD topology, `xpu-smi` (Intel), and DRM/sysfs. Live Performance-tab monitoring falls back to `amd-smi` when `rocm-smi` is absent |
 | macOS | `gopsutil` and `sysctl` virtualization state | `system_profiler`, including Apple unified memory and Metal |
 | Windows | `gopsutil` and WMI system metadata | `nvidia-smi`, DXGI, and WMI driver metadata or fallback enumeration |
 | Other Go platforms | Common host, CPU, and memory data | No platform accelerator probe |

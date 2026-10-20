@@ -45,6 +45,13 @@ func getGpuStats(ctx context.Context, every time.Duration, logger *logmon.Monito
 		logger.Debugf("rocm-smi: %s", err.Error())
 	}
 
+	if ch, err := tryAmdSmi(ctx, every, logger); err == nil {
+		logger.Info("using amd-smi for GPU monitoring")
+		return ch, nil
+	} else {
+		logger.Debugf("amd-smi: %s", err.Error())
+	}
+
 	if ch, err := trySysfs(ctx, every, logger); err == nil {
 		logger.Info("using sysfs for GPU monitoring")
 		return ch, nil
@@ -334,6 +341,68 @@ func parseRocmSmiLine(header string, line string) *GpuStat {
 	result.Name = name
 
 	return result
+}
+
+func tryAmdSmi(ctx context.Context, every time.Duration, logger *logmon.Monitor) (chan []GpuStat, error) {
+	if _, err := exec.LookPath("amd-smi"); err != nil {
+		return nil, ErrNoGpuTool
+	}
+	if every < time.Second {
+		every = time.Second
+	}
+	const pollTimeout = 5 * time.Second
+
+	// Device names come from the static query, which only has to succeed once.
+	// A failure leaves the fallback "AMD GPU <id>" names in place.
+	staticCtx, cancel := context.WithTimeout(ctx, pollTimeout)
+	staticOut, err := exec.CommandContext(staticCtx, "amd-smi", "static", "--json").Output()
+	staticTimedOut := staticCtx.Err() == context.DeadlineExceeded
+	cancel()
+	if err != nil {
+		if staticTimedOut {
+			logger.Debug("amd-smi static timed out")
+		} else {
+			logger.Debugf("amd-smi static: %s", err.Error())
+		}
+		staticOut = nil
+	}
+
+	ch := make(chan []GpuStat, 1)
+
+	go func() {
+		defer close(ch)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
+				cmd := exec.CommandContext(pollCtx, "amd-smi", "metric", "--json", "-m", "-u", "-t", "-p", "-f")
+				out, err := cmd.Output()
+				timedOut := pollCtx.Err() == context.DeadlineExceeded
+				cancel()
+				if err != nil {
+					if timedOut {
+						logger.Debug("amd-smi timed out")
+					}
+					continue
+				}
+
+				stats := ParseAmdSmi(out, staticOut)
+				if len(stats) > 0 {
+					select {
+					case ch <- stats:
+					default:
+					}
+				}
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 func trySysfs(ctx context.Context, every time.Duration, logger *logmon.Monitor) (chan []GpuStat, error) {
