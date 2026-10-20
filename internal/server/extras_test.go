@@ -9,10 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 func TestServer_DecompressBody(t *testing.T) {
@@ -275,6 +279,152 @@ func TestServer_HandleAPIUnloadModel(t *testing.T) {
 		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/unload/nope", nil))
 		if w.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404", w.Code)
+		}
+	})
+}
+
+func TestServer_HandleAPILoadModel(t *testing.T) {
+	t.Run("unknown model 404", func(t *testing.T) {
+		s := newTestServer(newStubRouter([]string{"m1"}, ""), newStubRouter(nil, ""))
+		s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/nope", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", w.Code)
+		}
+	})
+
+	t.Run("peer model 404", func(t *testing.T) {
+		s := newTestServer(newStubRouter([]string{"m1"}, ""), newStubRouter(nil, ""))
+		s.cfg = config.Config{
+			Models: map[string]config.ModelConfig{"m1": {}},
+			Peers:  config.PeerDictionaryConfig{"peer1": {Models: []string{"remote"}}},
+		}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/peer1/remote", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", w.Code)
+		}
+	})
+
+	t.Run("selector model 404", func(t *testing.T) {
+		s := newTestServer(newStubRouter([]string{"m1"}, ""), newStubRouter(nil, ""))
+		s.cfg = config.Config{
+			Models:    map[string]config.ModelConfig{"m1": {}},
+			Selectors: map[string]config.SelectorConfig{"auto": {Targets: []string{"m1"}}},
+		}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/auto", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", w.Code)
+		}
+	})
+
+	t.Run("configured but not handled locally 404", func(t *testing.T) {
+		s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+		s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/m1", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", w.Code)
+		}
+	})
+
+	t.Run("already loaded 200", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.running = map[string]process.ProcessState{"m1": process.StateReady}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/m1", nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", w.Code)
+		}
+		if w.Body.String() != "OK" {
+			t.Errorf("body = %q, want OK", w.Body.String())
+		}
+	})
+
+	t.Run("alias resolves to the real model", func(t *testing.T) {
+		cfg, err := config.LoadConfigFromReader(strings.NewReader(`
+models:
+  m1:
+    cmd: echo ${PORT}
+    aliases: [fast]
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		local := newStubRouter([]string{"m1"}, "")
+		var gotModel string
+		local.serveHTTP = func(w http.ResponseWriter, r *http.Request) {
+			data, _ := swaputil.ReadContext(r.Context())
+			gotModel = data.ModelID
+			w.WriteHeader(http.StatusOK)
+		}
+		s := newTestServerWithConfig(cfg, local, newStubRouter(nil, ""))
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/fast", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if gotModel != "m1" {
+			t.Errorf("dispatched model = %q, want m1", gotModel)
+		}
+	})
+
+	t.Run("cold load returns after the model is ready", func(t *testing.T) {
+		ready := make(chan struct{})
+		local := newStubRouter([]string{"m1"}, "")
+		local.serveHTTP = func(w http.ResponseWriter, r *http.Request) {
+			<-ready
+			w.WriteHeader(http.StatusOK)
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+		done := make(chan int, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/m1", nil))
+			done <- w.Code
+		}()
+
+		select {
+		case code := <-done:
+			t.Fatalf("load returned %d before the model became ready", code)
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		close(ready)
+		select {
+		case code := <-done:
+			if code != http.StatusOK {
+				t.Errorf("status = %d, want 200", code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("load did not return after the model became ready")
+		}
+	})
+
+	t.Run("failed start 502", func(t *testing.T) {
+		local := newStubRouter([]string{"m1"}, "")
+		local.serveHTTP = func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		s := newTestServer(local, newStubRouter(nil, ""))
+		s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/models/load/m1", nil))
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502", w.Code)
 		}
 	})
 }

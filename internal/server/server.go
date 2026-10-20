@@ -502,6 +502,7 @@ func (s *Server) routes() {
 	mux.Handle("POST /api/models/unload/{model...}", apiChain.ThenFunc(s.handleAPIUnloadModel))
 	mux.Handle("POST /api/models/pause", apiChain.ThenFunc(s.handleAPIPause))
 	mux.Handle("POST /api/models/resume", apiChain.ThenFunc(s.handleAPIResume))
+	mux.Handle("POST /api/models/load/{model...}", apiChain.ThenFunc(s.handleAPILoadModel))
 	mux.Handle("GET /api/profiles", apiChain.ThenFunc(s.handleAPIProfiles))
 	mux.Handle("PUT /api/profiles/active", apiChain.ThenFunc(s.handleAPIActiveProfile))
 	mux.Handle("POST /api/inflight/{id}/cancel", apiChain.ThenFunc(s.handleAPICancelInflight))
