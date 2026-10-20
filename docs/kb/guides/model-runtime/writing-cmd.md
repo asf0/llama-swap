@@ -76,6 +76,11 @@ These names are reserved — you cannot define a macro called `PORT`, `PID` or
 This mismatch is the single most common configuration error. If a model starts
 successfully but requests hang or return connection errors, check it first.
 
+A fixed `proxy` port on a local host — `localhost`, a loopback address such as
+`127.0.0.1` or `::1`, or `0.0.0.0` — is reserved. `${PORT}` allocation skips
+it, so a fixed-port model can live inside the automatic range without
+colliding with another model. Ports on remote hosts are not reserved.
+
 ## `checkEndpoint`: knowing when it's ready
 
 llama-swap polls `checkEndpoint` (default `/health`) until it returns HTTP 200,
