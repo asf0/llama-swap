@@ -39,16 +39,19 @@ func (lp *LoadingProgress) equal(o *LoadingProgress) bool {
 }
 
 // parseLoadingProgress reads loading progress from a health check body shaped
-// like {"progress": 0.42, "message": "loading tensors"}. Both fields are
-// optional, but a body with neither, or one that is not a JSON object, is not
-// a progress report. llama-server's 503 body while loading is one such body.
+// like {"progress": 0.42, "message": "loading tensors"}. All fields are
+// optional, but a body with none of them, or one that is not a JSON object, is
+// not a progress report. When message is empty, a non-empty loading_model is
+// shown as "loading <model>". llama-server's 503 body while loading is one such
+// body.
 func parseLoadingProgress(body []byte) (LoadingProgress, bool) {
 	if len(body) == 0 || len(body) > maxProgressBodyLen {
 		return LoadingProgress{}, false
 	}
 	var raw struct {
-		Progress *float64 `json:"progress"`
-		Message  *string  `json:"message"`
+		Progress     *float64 `json:"progress"`
+		Message      *string  `json:"message"`
+		LoadingModel *string  `json:"loading_model"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return LoadingProgress{}, false
@@ -61,6 +64,11 @@ func parseLoadingProgress(body []byte) (LoadingProgress, bool) {
 	}
 	if raw.Message != nil {
 		lp.Message = truncateRunes(strings.TrimSpace(*raw.Message), maxLoadingMessageLen)
+	}
+	if lp.Message == "" && raw.LoadingModel != nil {
+		if model := strings.TrimSpace(*raw.LoadingModel); model != "" {
+			lp.Message = truncateRunes("loading "+model, maxLoadingMessageLen)
+		}
 	}
 	if lp.Progress == nil && lp.Message == "" {
 		return LoadingProgress{}, false
