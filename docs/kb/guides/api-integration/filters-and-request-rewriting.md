@@ -1,10 +1,10 @@
 ---
 title: Rewriting requests with filters
-summary: Use stripParams, setParams and setParamsByID while preserving the protected model parameter.
+summary: Use top-level defaults plus stripParams, setParams, setParamsByID and setParamsByMatch while preserving the protected model parameter.
 category: guides
-tags: [filters, strip-params, set-params, set-if-undefined, aliases, sampling]
-config_keys: [models.*.filters, models.*.filters.stripParams, models.*.filters.setParams, models.*.filters.setParamsByID, peers.*.filters]
-updated: 2026-09-01
+tags: [filters, strip-params, set-params, set-params-by-match, set-if-undefined, aliases, sampling]
+config_keys: [filters, models.*.filters, models.*.filters.inherit, models.*.filters.stripParams, models.*.filters.setParams, models.*.filters.setParamsByID, models.*.filters.setParamsByMatch, peers.*.filters, peers.*.filters.setParamsByMatch]
+updated: 2026-11-04
 ---
 
 # Rewriting requests with filters
@@ -14,6 +14,55 @@ They exist on models and on peers, with the same three settings.
 
 The request's `model` parameter is protected: `stripParams` cannot remove it,
 and `setParams` cannot override it.
+
+## Top-level defaults and inheritance
+
+A top-level `filters` block is inherited by every local model, so a shared
+rule set does not need to be repeated on each model:
+
+```yaml
+filters:
+  stripParams: "temperature, top_p"
+  setParams:
+    top_k: 40
+  setParamsByMatch:
+    - key: reasoning_effort
+      match: low
+      set:
+        reasoning_budget_tokens: 2048
+```
+
+A model's own `filters` merge on top of these defaults:
+
+- `stripParams` lists are combined.
+- `setParams` maps are merged recursively. A model can override one nested key
+  without discarding the rest; model values win on shared keys.
+- `setParamsByMatch` rules from the model are appended **after** the global
+  rules. Every matching rule applies in order, so the model rule wins on a
+  shared key.
+- `setParamsByID` entries are merged per requested ID, and model params win on
+  shared keys.
+
+Opt a model out entirely with `inherit: false`. Its filters are then used
+exactly as written:
+
+```yaml
+models:
+  hipfire:
+    filters:
+      inherit: false
+      setParams:
+        max_tokens: 16384
+```
+
+Omitting `inherit` is the same as `true`. There are two boundaries worth
+remembering:
+
+- Peers do **not** inherit top-level filters. Configure `peers.*.filters`
+  separately.
+- Top-level `setParamsByID` keys are not auto-registered as aliases. Only
+  keys written in a model's own `filters.setParamsByID` keep the alias
+  behaviour described below.
 
 ## `stripParams` — remove parameters
 
@@ -98,6 +147,64 @@ Clients can now request `gpt-oss-120b`, `gpt-oss-120b:high` or
 reload — with different parameters applied.
 
 `setParamsByID` runs **after** `setParams`, so it wins on any key they share.
+
+## `setParamsByMatch` — vary a request without a swap
+
+`setParamsByID` varies behaviour by choosing a different model name. When the
+client sends one fixed `model` and varies something else — `reasoning_effort`,
+a template flag, a sampling knob — no alias exists to key off. Rules match on
+the request body instead:
+
+```yaml
+models:
+  gpt-oss-120b:
+    filters:
+      setParamsByMatch:
+        - key: reasoning_effort
+          match: none
+          set:
+            chat_template_kwargs: { enable_thinking: false }
+        - key: reasoning_effort
+          match: high
+          set:
+            chat_template_kwargs: { enable_thinking: true }
+            thinking_budget_tokens: 8192
+```
+
+A request with `reasoning_effort: "high"` gets thinking enabled and an 8192
+token budget; `reasoning_effort: "none"` disables thinking. Both hit the same
+loaded process — no swap, no reload.
+
+Rules are evaluated in order and **every** matching rule applies, so a later
+rule overrides an earlier one. A rule whose `key` is absent, or holds a
+different value, does nothing. Rules can be shared between models with a
+whole-value macro, most simply in the top-level defaults:
+
+```yaml
+macros:
+  "reasoning_rules":
+    - key: reasoning_effort
+      match: none
+      set: { chat_template_kwargs: { enable_thinking: false } }
+
+filters:
+  setParamsByMatch: ${reasoning_rules}
+
+models:
+  a: { cmd: /path/to/server --port ${PORT} }
+  b: { cmd: /path/to/server --port ${PORT} }
+```
+
+The failure modes are quiet, so watch for them:
+
+- `match` is compared against the field's **string form**: write
+  `match: "true"` and `match: "8192"` with quotes, or a JSON boolean or number
+  will never match.
+- `key` must be a top-level field using only letters, digits, `_` and `-`.
+  Dotted paths like `a.b` are rejected at load time. The `model` key cannot be
+  matched on.
+- An object under `set` is **merged** into an existing request object, keeping
+  sibling keys the client sent; anything else replaces the value.
 
 ## Order of operations
 

@@ -61,11 +61,17 @@ type Service struct {
 	inflight   map[string]struct{}
 }
 
-// memoEntry is a remembered lookup. found is false for a remembered miss.
+// memoEntry is a remembered lookup. found is false for a remembered miss;
+// probed records whether an actual probe result exists even when it carried no
+// capabilities (for example, a template with tool support explicitly off).
+// memoEntry is a remembered lookup. found is false for a remembered miss;
+// probed records whether an actual probe result exists even when it carried no
+// capabilities (for example, a template with tool support explicitly off).
 type memoEntry struct {
 	caps     config.ModelCapConfig
 	upstream hint.Upstream
 	found    bool
+	probed   bool
 }
 
 // New returns a Service backed by cache. A nil cache disables persistence;
@@ -132,7 +138,32 @@ func (s *Service) lookup(ctx context.Context, key string) memoEntry {
 		return memoEntry{}
 	}
 
-	return s.remember(key, info, found)
+	return s.remember(key, info, found, found || info.Upstream != "")
+}
+
+// Probed reports whether a capability probe has produced a result for key,
+// even when that result carried no capabilities. Lookup deliberately treats
+// an empty result as a miss so listings stay sparse; callers that need to know
+// whether the upstream was actually asked use this instead.
+func (s *Service) Probed(ctx context.Context, key string) bool {
+	if s == nil {
+		return false
+	}
+
+	s.mu.RLock()
+	entry, memoized := s.memo[key]
+	s.mu.RUnlock()
+	if memoized {
+		return entry.probed
+	}
+
+	info, found, err := s.read(ctx, key)
+	if err != nil {
+		return false
+	}
+	probed := found || info.Upstream != ""
+	s.remember(key, info, found, probed)
+	return probed
 }
 
 // Refresh probes the upstream behind c and stores what it reports under key.
@@ -180,7 +211,7 @@ func (s *Service) Record(ctx context.Context, key string, info Info, detectErr e
 				}
 			}
 			// Remember the miss so /v1/models stops hitting the store.
-			s.remember(key, Info{}, false)
+			s.remember(key, Info{}, false, false)
 			s.logf("capcompat: %s: %v", key, detectErr)
 			return nil
 		}
@@ -195,7 +226,7 @@ func (s *Service) Record(ctx context.Context, key string, info Info, detectErr e
 	// Remember before persisting. The probe succeeded either way, so a store
 	// that cannot be written should cost durability across a restart, not the
 	// value this process just learned.
-	s.remember(key, info, true)
+	s.remember(key, info, true, true)
 	s.logf("capcompat: %s reported by %s: %s", key, info.Upstream, describe(info.Capabilities))
 
 	if s.cache != nil {
@@ -258,7 +289,9 @@ func (s *Service) read(ctx context.Context, key string) (Info, bool, error) {
 		return Info{}, false, fmt.Errorf("capcompat: decoding cached %s: %w", key, err)
 	}
 	if info.Capabilities.Empty() {
-		return Info{}, false, nil
+		// Keep Upstream so Probed can distinguish a real empty result from a
+		// missing cache row.
+		return info, false, nil
 	}
 	// Rows written before Info.Upstream was a hint.Upstream hold prober
 	// names such as "default". Treat any value llama-swap does not know as
@@ -280,8 +313,8 @@ func (s *Service) Forget(key string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) remember(key string, info Info, found bool) memoEntry {
-	entry := memoEntry{caps: info.Capabilities, upstream: info.Upstream, found: found}
+func (s *Service) remember(key string, info Info, found, probed bool) memoEntry {
+	entry := memoEntry{caps: info.Capabilities, upstream: info.Upstream, found: found, probed: probed}
 	s.mu.Lock()
 	s.memo[key] = entry
 	s.mu.Unlock()
