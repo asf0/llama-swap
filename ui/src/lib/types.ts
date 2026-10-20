@@ -48,6 +48,8 @@ export interface Model {
   strategy?: string;
   targets?: string[];
   spillover?: number;
+  // URL of the backend's own UI, from the v1/models llamaswap metadata
+  uiUrl?: string;
 }
 
 export interface Profile {

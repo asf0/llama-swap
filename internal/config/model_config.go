@@ -230,6 +230,10 @@ type ModelConfig struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 
+	// UiURL is the backend's own UI, linked from the llama-swap interface.
+	// It must be an absolute http(s) URL or a root-relative path.
+	UiURL string `yaml:"uiUrl"`
+
 	// Limit concurrency of HTTP requests to process
 	ConcurrencyLimit int `yaml:"concurrencyLimit"`
 

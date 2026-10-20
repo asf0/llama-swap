@@ -466,6 +466,12 @@
                         "maxLength": 1024,
                         "description": "Description for the model. Used in v1/models API response."
                     },
+                    "uiUrl": {
+                        "type": "string",
+                        "default": "",
+                        "pattern": "^(https?://[^\\s]+|/[^\\s]*)$",
+                        "description": "URL of the backend's own web UI, linked from the llama-swap interface. Use an absolute http:// or https:// URL, or a root-relative path. This is different from /upstream/<model>/, which cannot rewrite the backend's root-absolute asset URLs."
+                    },
                     "env": {
                         "type": "array",
                         "items": {

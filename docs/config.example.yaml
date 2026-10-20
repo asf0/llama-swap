@@ -388,6 +388,13 @@ models:
     # - if not set, it will be omitted in the JSON model record
     description: "A thinking model from OpenAI"
 
+    # uiUrl: URL of the backend's own web UI, linked from llama-swap
+    # - optional, default: empty (link to /upstream/<model>/ instead)
+    # - use an absolute http:// or https:// URL, or a root-relative path
+    # - differs from /upstream/<model>/: the backend sees its real root, so
+    #   root-absolute asset URLs keep working
+    # uiUrl: "http://127.0.0.1:19095/ui/"
+
     # env: define an array of environment variables to inject into cmd's environment
     # - optional, default: empty array
     # - each value is a single string

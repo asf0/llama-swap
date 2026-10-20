@@ -21,7 +21,7 @@
   import * as Switch from "$lib/components/ui/switch/index.js";
   import * as Label from "$lib/components/ui/label/index.js";
   import { PowerOff, Loader2, ExternalLink, SquareStack } from "@lucide/svelte";
-  import { modelServerPath } from "../lib/modelUtils";
+  import { modelOpenPath } from "../lib/modelUtils";
 
   let unloadingAll = $state(false);
 
@@ -99,12 +99,12 @@
     {/if}
     {#if !model.peerID}
       <a
-        href={modelServerPath(model.id)}
+        href={modelOpenPath(model)}
         target="_blank"
         rel="noopener noreferrer"
         class="text-muted-foreground hover:text-foreground"
-        title="Open model server"
-        aria-label="Open model server"
+        title="Open model UI"
+        aria-label="Open model UI"
       >
         <ExternalLink class="size-4" />
       </a>

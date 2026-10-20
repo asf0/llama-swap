@@ -315,6 +315,10 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		return Config{}, err
 	}
 
+	if err := validateModelUIURLs(config); err != nil {
+		return Config{}, err
+	}
+
 	if err := validateSelectors(config); err != nil {
 		return Config{}, err
 	}
@@ -375,6 +379,42 @@ func validateCheckReady(config Config) error {
 		if cr.Equals != nil && cr.NotEquals != nil {
 			return fmt.Errorf("model %s: checkReady cannot set both equals and notEquals", modelID)
 		}
+	}
+	return nil
+}
+
+// validateModelUIURLs checks every model's optional uiUrl. A UI link is either
+// an absolute http(s) URL or a root-relative path; everything else, notably
+// javascript: URLs and protocol-relative //host values, is rejected so the
+// value can be used as an href safely.
+func validateModelUIURLs(config Config) error {
+	for modelID, modelConfig := range config.Models {
+		if err := validateUIURL(modelConfig.UiURL); err != nil {
+			return fmt.Errorf("model %s: uiUrl: %w", modelID, err)
+		}
+	}
+	return nil
+}
+
+func validateUIURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "/") {
+		if strings.HasPrefix(raw, "//") {
+			return fmt.Errorf("must not be protocol-relative, use an absolute http(s) URL")
+		}
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("must be an absolute http:// or https:// URL or a path starting with /")
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("absolute URL is missing a host")
 	}
 	return nil
 }

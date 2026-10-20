@@ -44,6 +44,15 @@ export function modelServerPath(modelId: string): string {
   return apiUrl(`/upstream/${encodeURIComponent(modelId)}/`);
 }
 
+/**
+ * Where the open-model button links. A model configured with its own UI uses
+ * that URL directly, since the passthrough path cannot rewrite root-absolute
+ * asset URLs; everything else falls back to the model's server path.
+ */
+export function modelOpenPath(model: Model): string {
+  return model.uiUrl || modelServerPath(model.id);
+}
+
 export function matchesCapabilities(model: Model, required: string[], matchAny = false): boolean {
   if (!required.length) return true;
   if (!model.capabilities) return false;

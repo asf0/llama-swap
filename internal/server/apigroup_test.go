@@ -600,6 +600,85 @@ func TestServer_APIPerformance_Unavailable(t *testing.T) {
 	}
 }
 
+func TestServer_UiURLMetadata(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	s.cfg = config.Config{
+		IncludeAliasesInList: true,
+		Models: map[string]config.ModelConfig{
+			"with-ui": {Aliases: []string{"with-ui-alias"}, UiURL: "http://host:19095/ui/"},
+			"no-ui":   {},
+		},
+	}
+
+	t.Run("v1 models", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+		var resp struct {
+			Data []modelRecord `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		records := make(map[string]modelRecord, len(resp.Data))
+		for _, record := range resp.Data {
+			records[record.ID] = record
+		}
+		for _, id := range []string{"with-ui", "with-ui-alias"} {
+			meta, ok := records[id].Meta["llamaswap"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s meta.llamaswap missing: %+v", id, records[id].Meta)
+			}
+			if got := meta["uiUrl"]; got != "http://host:19095/ui/" {
+				t.Errorf("%s uiUrl = %v", id, got)
+			}
+		}
+		meta, ok := records["no-ui"].Meta["llamaswap"].(map[string]any)
+		if !ok {
+			t.Fatalf("no-ui meta.llamaswap missing: %+v", records["no-ui"].Meta)
+		}
+		if _, found := meta["uiUrl"]; found {
+			t.Errorf("no-ui should not carry uiUrl: %v", meta)
+		}
+	})
+
+	t.Run("api events", func(t *testing.T) {
+		w := serveLogEvents(t, s, "/api/events", nil)
+
+		var status []apiModel
+		for _, line := range strings.Split(w.Body.String(), "\n") {
+			payload, ok := strings.CutPrefix(line, "data:")
+			if !ok {
+				continue
+			}
+			var env struct {
+				Type string `json:"type"`
+				Data string `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(payload), &env); err != nil || env.Type != string(msgTypeModelStatus) {
+				continue
+			}
+			if err := json.Unmarshal([]byte(env.Data), &status); err != nil {
+				t.Fatalf("decode modelStatus: %v", err)
+			}
+			break
+		}
+		if len(status) == 0 {
+			t.Fatalf("no modelStatus event in body: %q", w.Body.String())
+		}
+		byID := make(map[string]apiModel, len(status))
+		for _, model := range status {
+			byID[model.Id] = model
+		}
+		if got := byID["with-ui"].UiURL; got != "http://host:19095/ui/" {
+			t.Errorf("with-ui uiUrl = %q", got)
+		}
+		if got := byID["no-ui"].UiURL; got != "" {
+			t.Errorf("no-ui uiUrl = %q, want empty", got)
+		}
+	})
+}
+
 func TestServer_APIEvents_InitialPayload(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	s.cfg.UI.Activity.SessionID = []string{"X-Trace-ID"}
