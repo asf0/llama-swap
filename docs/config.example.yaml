@@ -411,6 +411,12 @@ models:
     # - use "none" to skip endpoint health checking
     checkEndpoint: /custom-endpoint
 
+    # healthCheckTimeout: seconds to wait for this model to become ready
+    # - optional, default: 0 (use the global healthCheckTimeout)
+    # - a non-zero value overrides the global setting for this model
+    # - values below 15 are clamped to 15
+    # healthCheckTimeout: 900
+
     # ttl: automatically unload the model after ttl seconds
     # - optional, default: -1 (use global default)
     # - ttl values must be a value greater than or equal to 0

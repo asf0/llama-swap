@@ -71,10 +71,11 @@ type fakeProcess struct {
 	// Stop calls can be in flight simultaneously.
 	stopBlock chan struct{}
 
-	runCalls     atomic.Int32
-	stopCalls    atomic.Int32
-	serveCalls   atomic.Int32
-	stopTimeouts []time.Duration
+	runCalls      atomic.Int32
+	stopCalls     atomic.Int32
+	serveCalls    atomic.Int32
+	stopTimeouts  []time.Duration
+	ensureTimeout time.Duration
 
 	// onStop, when non-nil, is invoked at the start of every Stop call.
 	// Tests share one recorder across fakes to observe stop ordering.
@@ -225,11 +226,18 @@ func (f *fakeProcess) lastStopTimeout() time.Duration {
 	return f.stopTimeouts[len(f.stopTimeouts)-1]
 }
 
+func (f *fakeProcess) lastEnsureTimeout() time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ensureTimeout
+}
+
 // EnsureReady mirrors ProcessCommand.EnsureReady: it takes the start decision
 // under opMu (the fake's stand-in for the run loop) so a stop still in flight
 // holds the caller until the process is really stopped, then starts.
-func (f *fakeProcess) EnsureReady(ctx context.Context, _ time.Duration) error {
+func (f *fakeProcess) EnsureReady(ctx context.Context, timeout time.Duration) error {
 	f.mu.Lock()
+	f.ensureTimeout = timeout
 	select {
 	case <-f.ensureAsked:
 	default:

@@ -496,6 +496,12 @@
                         "pattern": "^/.*$|^none$",
                         "description": "URL path to check if the server is ready. Use 'none' to skip health checking. A non-200 response with a JSON body like {\"progress\": 0.42, \"message\": \"...\"} reports loading progress."
                     },
+                    "healthCheckTimeout": {
+                        "type": "integer",
+                        "minimum": 15,
+                        "default": 0,
+                        "description": "Number of seconds to wait for this model to be ready, overriding the global healthCheckTimeout. 0 or omitted uses the global value. Values below 15 are clamped to 15. As with the global setting, a change in reported loading progress restarts the countdown."
+                    },
                     "ttl": {
                         "type": "integer",
                         "minimum": -1,

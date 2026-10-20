@@ -3,8 +3,8 @@ title: Writing the cmd for a model
 summary: Minimal model config using cmd and ${PORT}, plus proxy, checkEndpoint loading progress, Docker, and llama-server's --jinja flag.
 category: guides
 tags: [cmd, port, proxy, model-id, check-endpoint, health-check, loading-progress, tools, tool-calling, jinja, llama-server, minimal, configuration, getting-started, docker, container]
-config_keys: [models.*.cmd, models.*.proxy, models.*.checkEndpoint, models.*.env, startPort, healthCheckTimeout]
-updated: 2026-10-07
+config_keys: [models.*.cmd, models.*.proxy, models.*.checkEndpoint, models.*.healthCheckTimeout, models.*.env, startPort, healthCheckTimeout]
+updated: 2026-10-20
 ---
 
 # Writing the `cmd` for a model
@@ -90,6 +90,22 @@ Set `checkEndpoint: "none"` to skip health checking entirely — llama-swap then
 forwards the first request immediately, which usually means it fails while the
 server is still loading weights. Only use it for servers with no usable
 readiness endpoint.
+
+### Per-model startup timeout
+
+A slow-loading model can set `healthCheckTimeout` on the model. A non-zero value
+overrides the global timeout; `0` or omitting it uses the global value, and
+values below 15 are clamped to 15 seconds.
+
+```yaml
+models:
+  huge-model:
+    cmd: llama-server --port ${PORT} --model /models/huge.gguf
+    healthCheckTimeout: 900
+```
+
+The timeout only covers starting that model. Stopping other models during the
+swap still uses the global timeout.
 
 ### Loading progress
 

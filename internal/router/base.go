@@ -242,6 +242,7 @@ func (b *baseRouter) trackedServe(modelID string, p process.Process) http.Handle
 
 func (b *baseRouter) doSwap(modelID string, toStop []string) {
 	timeout := b.healthCheckTimeout()
+	startTimeout := b.startTimeout(modelID)
 
 	var wg sync.WaitGroup
 	for _, mID := range toStop {
@@ -262,7 +263,7 @@ func (b *baseRouter) doSwap(modelID string, toStop []string) {
 	// process nobody was ever going to start (issue #946). EnsureReady makes
 	// the same decision inside the process, where the state is owned.
 	target := b.processes[modelID]
-	err := target.EnsureReady(b.shutdownCtx, timeout)
+	err := target.EnsureReady(b.shutdownCtx, startTimeout)
 	if err != nil && b.shutdownCtx.Err() == nil {
 		// Quiet during shutdown: every in-flight swap fails at once there, and
 		// that is expected rather than worth a warning per model.
@@ -335,6 +336,16 @@ func (b *baseRouter) healthCheckTimeout() time.Duration {
 		return 30 * time.Second
 	}
 	return t
+}
+
+// startTimeout is how long the target model may take to become ready. A
+// per-model healthCheckTimeout wins; zero (the config loader fills it with the
+// global value) falls back to the global timeout.
+func (b *baseRouter) startTimeout(modelID string) time.Duration {
+	if mc, ok := b.config.Models[modelID]; ok && mc.HealthCheckTimeout > 0 {
+		return time.Duration(mc.HealthCheckTimeout) * time.Second
+	}
+	return b.healthCheckTimeout()
 }
 
 // unloadTimeout returns the graceful stop timeout for a model. Config parsing

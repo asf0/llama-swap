@@ -116,6 +116,42 @@ func TestBaseRouter_RunningStatus(t *testing.T) {
 	}
 }
 
+func TestBaseRouter_StartTimeoutUsesModelOverride(t *testing.T) {
+	target := newFakeProcess("target")
+	target.autoReady = true
+
+	b := newTestBaseWithConfig(t, config.Config{
+		HealthCheckTimeout: 120,
+		Models: map[string]config.ModelConfig{
+			"target": {HealthCheckTimeout: 900},
+		},
+	}, map[string]process.Process{"target": target}, &stubPlanner{})
+
+	b.doSwap("target", nil)
+
+	if got := target.lastEnsureTimeout(); got != 900*time.Second {
+		t.Errorf("EnsureReady timeout = %v, want 900s from the model override", got)
+	}
+}
+
+func TestBaseRouter_StartTimeoutFallsBackToGlobal(t *testing.T) {
+	target := newFakeProcess("target")
+	target.autoReady = true
+
+	b := newTestBaseWithConfig(t, config.Config{
+		HealthCheckTimeout: 120,
+		Models: map[string]config.ModelConfig{
+			"target": {},
+		},
+	}, map[string]process.Process{"target": target}, &stubPlanner{})
+
+	b.doSwap("target", nil)
+
+	if got := target.lastEnsureTimeout(); got != 120*time.Second {
+		t.Errorf("EnsureReady timeout = %v, want 120s from the global setting", got)
+	}
+}
+
 func TestBaseRouter_UnloadAll(t *testing.T) {
 	a := newFakeProcess("a")
 	a.markReady()
