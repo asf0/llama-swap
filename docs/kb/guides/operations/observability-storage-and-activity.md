@@ -4,7 +4,7 @@ summary: Use logs, metrics, captures and the Activity view to diagnose requests 
 category: guides
 tags: [operations, logs, metrics, activity, captures, stdout, http]
 config_keys: [logLevel, logToStdout, metricsMaxInMemory, captureBuffer]
-updated: 2026-09-25
+updated: 2026-10-20
 ---
 
 # Observability, storage and Activity
@@ -20,6 +20,15 @@ logToStdout: "proxy,http"
 metricsMaxInMemory: 1000
 captureBuffer: 100
 ```
+
+## Activity timing
+
+The Activity view reads per-request timings from the backend response. llama.cpp
+reports `prompt_n`, `predicted_n`, `prompt_per_second` and
+`predicted_per_second`; hipfire reports `prefill_tok_s` and `decode_tok_s`.
+hipfire's `tok_s` is wall-inclusive and is used only when `decode_tok_s` is
+absent. Token counts fall back to `usage`, so a `timings` object that omits the
+llama.cpp fields does not zero the Prompt or Generated columns.
 
 ## Log streams
 

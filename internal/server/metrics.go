@@ -508,20 +508,62 @@ func buildMetrics(modelID string, start time.Time, inputTokens, outputTokens, ca
 	}
 
 	if timings.Exists() {
-		inputTokens = timings.Get("prompt_n").Int()
-		outputTokens = timings.Get("predicted_n").Int()
-		promptPerSecond = timings.Get("prompt_per_second").Float()
-		tokensPerSecond = timings.Get("predicted_per_second").Float()
-		timingsDurationMs := int(timings.Get("prompt_ms").Float() + timings.Get("predicted_ms").Float())
+		// Read llama-server timing fields only when present. Other backends
+		// also use a "timings" object, and a missing field must not overwrite
+		// the token counts we already read from usage.
+		if v := timings.Get("prompt_n"); v.Type == gjson.Number {
+			inputTokens = v.Int()
+		}
+		if v := timings.Get("predicted_n"); v.Type == gjson.Number {
+			outputTokens = v.Int()
+		}
+		if v := timings.Get("prompt_per_second"); v.Type == gjson.Number {
+			promptPerSecond = v.Float()
+		}
+		if v := timings.Get("predicted_per_second"); v.Type == gjson.Number {
+			tokensPerSecond = v.Float()
+		}
+
+		// hipfire uses prefill_tok_s/decode_tok_s in its timings block. tok_s
+		// is wall-inclusive, so use it only when decode_tok_s is absent.
+		hipfireTimings := false
+		if v := timings.Get("prefill_tok_s"); v.Type == gjson.Number {
+			promptPerSecond = v.Float()
+			hipfireTimings = true
+		}
+		if v := timings.Get("decode_tok_s"); v.Type == gjson.Number {
+			tokensPerSecond = v.Float()
+			hipfireTimings = true
+		} else if v := timings.Get("tok_s"); v.Type == gjson.Number {
+			tokensPerSecond = v.Float()
+			hipfireTimings = true
+		}
+
+		timingsDurationMs := 0
+		if v := timings.Get("prompt_ms"); v.Type == gjson.Number {
+			timingsDurationMs = int(v.Float())
+		} else if v := timings.Get("prefill_ms"); v.Type == gjson.Number {
+			timingsDurationMs = int(v.Float())
+		}
+		if v := timings.Get("predicted_ms"); v.Type == gjson.Number {
+			timingsDurationMs += int(v.Float())
+		}
 		if timingsDurationMs > durationMs {
 			durationMs = timingsDurationMs
 		}
-		if cachedValue := timings.Get("cache_n"); cachedValue.Exists() {
-			cachedTokens = cachedValue.Int()
+		if v := timings.Get("cache_n"); v.Type == gjson.Number {
+			cachedTokens = v.Int()
 		}
-		if timings.Get("draft_n").Exists() && timings.Get("draft_n_accepted").Exists() {
-			draftTokens = int(timings.Get("draft_n").Int())
-			draftAccTokens = int(timings.Get("draft_n_accepted").Int())
+		if draftN, draftAcc := timings.Get("draft_n"), timings.Get("draft_n_accepted"); draftN.Type == gjson.Number && draftAcc.Type == gjson.Number {
+			draftTokens = int(draftN.Int())
+			draftAccTokens = int(draftAcc.Int())
+		}
+
+		// hipfire's usage.prompt_tokens includes cached tokens, while
+		// prefill_tok_s covers only the new ones. Report the new count so
+		// Prompt and Prefill describe the same work.
+		if hipfireTimings && inputTokens > 0 && cachedTokens > 0 && inputTokens >= cachedTokens {
+			inputTokens -= cachedTokens
 		}
 	}
 	// vLLM reports speculative decoding counts under metrics.speculative_decoding

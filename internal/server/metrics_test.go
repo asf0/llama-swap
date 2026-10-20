@@ -104,6 +104,83 @@ func TestServer_ParseMetrics_Timings(t *testing.T) {
 	}
 }
 
+func TestServer_ParseMetrics_Hipfire(t *testing.T) {
+	body := `{"usage":{"prompt_tokens":32918,"completion_tokens":478,"total_tokens":33396,"prompt_tokens_details":{"cached_tokens":32401}},"timings":{"ttft_ms":514.4,"prefill_ms":514.4,"prefill_tok_s":1005.1,"decode_tok_s":52.4,"latency_ms":null,"tok_s":49.6}}`
+	parsed := gjson.Parse(body)
+	entry, err := parseMetrics("m", time.Now(), parsed.Get("usage"), parsed.Get("timings"), parsed.Get("metrics"))
+	if err != nil {
+		t.Fatalf("parseMetrics: %v", err)
+	}
+	if entry.Tokens.InputTokens != 517 || entry.Tokens.OutputTokens != 478 || entry.Tokens.CachedTokens != 32401 {
+		t.Fatalf("tokens = %+v, want 517/478/32401", entry.Tokens)
+	}
+	if got, want := entry.Tokens.PromptPerSecond, 1005.1; math.Abs(got-want) > 1e-9 {
+		t.Errorf("PromptPerSecond = %v, want %v", got, want)
+	}
+	if got, want := entry.Tokens.TokensPerSecond, 52.4; math.Abs(got-want) > 1e-9 {
+		t.Errorf("TokensPerSecond = %v, want %v", got, want)
+	}
+	if entry.DurationMs < 514 {
+		t.Errorf("DurationMs = %d, want at least 514", entry.DurationMs)
+	}
+}
+
+func TestServer_ParseMetrics_HipfireTokSFallback(t *testing.T) {
+	body := `{"usage":{"prompt_tokens":100,"completion_tokens":10},"timings":{"prefill_tok_s":null,"decode_tok_s":null,"tok_s":49.6}}`
+	parsed := gjson.Parse(body)
+	entry, err := parseMetrics("m", time.Now(), parsed.Get("usage"), parsed.Get("timings"), parsed.Get("metrics"))
+	if err != nil {
+		t.Fatalf("parseMetrics: %v", err)
+	}
+	if entry.Tokens.InputTokens != 100 || entry.Tokens.OutputTokens != 10 {
+		t.Fatalf("tokens = %+v, want 100/10", entry.Tokens)
+	}
+	if got, want := entry.Tokens.TokensPerSecond, 49.6; math.Abs(got-want) > 1e-9 {
+		t.Errorf("TokensPerSecond = %v, want %v", got, want)
+	}
+	if entry.Tokens.PromptPerSecond != -1 {
+		t.Errorf("PromptPerSecond = %v, want -1", entry.Tokens.PromptPerSecond)
+	}
+}
+
+// An unfamiliar timings shape must not zero token counts that came from usage.
+func TestServer_ParseMetrics_TimingsWithoutLlamaFieldsKeepsUsage(t *testing.T) {
+	body := `{"usage":{"prompt_tokens":12,"completion_tokens":7},"timings":{"ttft_ms":100}}`
+	parsed := gjson.Parse(body)
+	entry, err := parseMetrics("m", time.Now(), parsed.Get("usage"), parsed.Get("timings"), parsed.Get("metrics"))
+	if err != nil {
+		t.Fatalf("parseMetrics: %v", err)
+	}
+	if entry.Tokens.InputTokens != 12 || entry.Tokens.OutputTokens != 7 {
+		t.Fatalf("tokens = %+v, want 12/7", entry.Tokens)
+	}
+}
+
+func TestServer_ProcessStreamingResponse_Hipfire(t *testing.T) {
+	body := []byte(`data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"timings":{"ttft_ms":514.4,"prefill_ms":514.4,"prefill_tok_s":1005.1,"decode_tok_s":52.4}}
+
+data: {"choices":[],"usage":{"prompt_tokens":32918,"completion_tokens":478,"total_tokens":33396,"prompt_tokens_details":{"cached_tokens":32401}}}
+
+data: [DONE]
+
+`)
+	entry, err := processStreamingResponse("m", time.Now(), body)
+	if err != nil {
+		t.Fatalf("processStreamingResponse: %v", err)
+	}
+	if entry.Tokens.InputTokens != 517 || entry.Tokens.OutputTokens != 478 || entry.Tokens.CachedTokens != 32401 {
+		t.Fatalf("tokens = %+v, want 517/478/32401", entry.Tokens)
+	}
+	if got, want := entry.Tokens.PromptPerSecond, 1005.1; math.Abs(got-want) > 1e-9 {
+		t.Errorf("PromptPerSecond = %v, want %v", got, want)
+	}
+	if got, want := entry.Tokens.TokensPerSecond, 52.4; math.Abs(got-want) > 1e-9 {
+		t.Errorf("TokensPerSecond = %v, want %v", got, want)
+	}
+}
+
 func TestServer_ParseMetrics_TabbyAPI(t *testing.T) {
 	body := `{"id":"chatcmpl-131b9995cd0c40c99e2ce958083ee406","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":83,"prompt_time":2.36,"prompt_tokens_per_sec":35.17,"completion_tokens":192,"completion_time":11.22,"completion_tokens_per_sec":17.11,"total_tokens":275,"total_time":13.63},"model":"SC_6.00bpw_H6_V6"}`
 	parsed := gjson.Parse(body)
