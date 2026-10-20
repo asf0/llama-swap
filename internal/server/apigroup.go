@@ -194,6 +194,43 @@ func (s *Server) handleAPIUnloadModel(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+// handleAPILoadModel loads a single named local model by dispatching a
+// synthetic request through the model router, the same way startPreload warms
+// a model at startup. It returns once the model is ready or the start fails.
+func (s *Server) handleAPILoadModel(w http.ResponseWriter, r *http.Request) {
+	requested := strings.TrimPrefix(r.PathValue("model"), "/")
+	realName, found := s.cfg.RealModelName(requested)
+	if !found {
+		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
+		return
+	}
+	if !s.local.Handles(realName) {
+		swaputil.SendResponse(w, r, http.StatusNotFound, "no local server found for requested model")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "/", nil)
+	if err != nil {
+		swaputil.SendResponse(w, r, http.StatusInternalServerError, "failed to create load request")
+		return
+	}
+	req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{
+		Model:    realName,
+		ModelID:  realName,
+		Metadata: make(map[string]string),
+	}))
+
+	dw := &discardResponseWriter{status: http.StatusOK}
+	s.local.ServeHTTP(dw, req)
+
+	if dw.status >= http.StatusBadRequest {
+		swaputil.SendResponse(w, r, http.StatusBadGateway, fmt.Sprintf("failed to load model: status %d", dw.status))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 // handleAPIActivity serves paginated activity table rows.
 func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 	query, err := parseActivityQuery(r)

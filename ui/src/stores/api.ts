@@ -431,8 +431,8 @@ export async function cancelInflightRequest(id: string): Promise<void> {
 
 export async function loadModel(model: string, signal?: AbortSignal): Promise<void> {
   try {
-    const response = await fetch(apiUrl(`/upstream/${model}/?_=${Date.now()}`), {
-      method: "GET",
+    const response = await fetch(apiUrl(`/api/models/load/${encodeURIComponent(model)}`), {
+      method: "POST",
       signal,
     });
     if (!response.ok) {
