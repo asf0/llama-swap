@@ -110,7 +110,7 @@ missing fields. Put the most authoritative probe first when adding a new probe.
 
 | Platform | Environment and memory | Accelerators |
 | --- | --- | --- |
-| Linux | `gopsutil`, `/proc/zoneinfo`, WSL markers, virtualization metadata, `systemd-detect-virt`, container markers, cgroup memory limits | `nvidia-smi`, `rocm-smi`, AMD KFD topology, `xpu-smi` (Intel), and DRM/sysfs. Live Performance-tab monitoring falls back to `amd-smi` when `rocm-smi` is absent |
+| Linux | `gopsutil`, `/proc/zoneinfo`, WSL markers, virtualization metadata, `systemd-detect-virt`, container markers, cgroup memory limits | `nvidia-smi`, `rocm-smi`, AMD KFD topology, `xpu-smi` (Intel), and DRM/sysfs. When `rocm-smi` is absent, `amd-smi static` and `amd-smi metric` fill in the AMD market name, memory model, driver, and power limit over the KFD record by PCI identity. The Performance tab uses the same `amd-smi` fallback for live monitoring |
 | macOS | `gopsutil` and `sysctl` virtualization state | `system_profiler`, including Apple unified memory and Metal |
 | Windows | `gopsutil` and WMI system metadata | `nvidia-smi`, DXGI, and WMI driver metadata or fallback enumeration |
 | Other Go platforms | Common host, CPU, and memory data | No platform accelerator probe |
@@ -124,7 +124,8 @@ on supported Linux and Windows systems.
 - `validate.go`: schema and cross-field checks.
 - `detect.go`: common detection, normalization, merging, and final indexing.
 - `nvidia.go`: shared one-shot NVIDIA detection and parsing.
-- `amd_linux.go`: Linux ROCm and KFD topology detection for AMD GPUs.
+- `amd_linux.go`: Linux ROCm, KFD topology, and `amd-smi` fallback detection
+  for AMD GPUs.
 - `intel.go`: Intel PCI device-ID to architecture and model table.
 - `intel_linux.go`: Linux `xpu-smi` (Intel XPU Manager) detection for Intel GPUs. The sysfs DRM probe reports discrete Arc cards as `shared_system` when the driver does not expose `mem_info_vram_total`; `xpu-smi discovery` supplies the dedicated capacity (`memory_physical_size_byte`) and merges over the sysfs record by PCI identity.
 - `apple.go`: macOS `system_profiler` Metal family key names and version parsing.
