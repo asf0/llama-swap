@@ -113,6 +113,8 @@ helpagent:
 # - the ${PORT} macro can be used in model.cmd, and elsewhere in that model once
 #   model.cmd uses it
 # - it is automatically incremented for every model that uses it
+# - fixed local proxy ports are reserved and skipped, so a model with a
+#   hardcoded port can live inside the automatic range
 startPort: 10001
 
 # sendLoadingState: inject loading status updates into the reasoning (thinking)

@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -175,41 +178,75 @@ func resolveConfigMacros(yamlStr string) (map[string]any, configMacroConfig, err
 	}
 	sort.Strings(modelIDs)
 
-	nextPort := startPort
+	// Fixed local proxy ports are reserved before allocation so an automatic
+	// ${PORT} value can never collide with a model that binds a hardcoded
+	// port. The pre-pass expands each model once and records its expanded
+	// form, so the allocation loop below does not need to expand it again.
+	type preparedModel struct {
+		model     map[string]any
+		needsPort bool
+	}
+	prepared := make(map[string]preparedModel, len(modelIDs))
+	reservedPorts := make(map[int]struct{})
 	for _, modelID := range modelIDs {
 		model, ok := models[modelID].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		// mergeModelMacros adds MODEL_ID, overlays model definitions on globals,
-		// and preserves declaration order. The recursive substitution then
-		// covers every model value; setParamsByID keys are handled separately
-		// because ordinary mapping keys are intentionally not macro targets.
 		macros := mergeModelMacros(modelID, declarations.Macros, declarations.Models[modelID].Macros)
 		resolved, err := substituteMacroList(model, macros)
 		if err != nil {
 			return nil, configMacroConfig{}, fmt.Errorf("model %s: %w", modelID, err)
 		}
 		model = resolved.(map[string]any)
-		if err := substituteSetParamsByIDKeys(model, macros); err != nil {
-			return nil, configMacroConfig{}, fmt.Errorf("model %s filters.setParamsByID: %w", modelID, err)
-		}
 
 		cmd, _ := model["cmd"].(string)
 		proxy, _ := model["proxy"].(string)
 		cmdHasPort := strings.Contains(cmd, "${PORT}")
 		proxyHasPort := strings.Contains(proxy, "${PORT}")
-		if cmdHasPort || proxyHasPort {
+		if !cmdHasPort && proxyHasPort {
+			return nil, configMacroConfig{}, fmt.Errorf("model %s: proxy uses ${PORT} but cmd does not - ${PORT} is only available when used in cmd", modelID)
+		}
+
+		needsPort := cmdHasPort || proxyHasPort
+		if !needsPort {
+			if port, ok := localProxyPort(proxy); ok {
+				reservedPorts[port] = struct{}{}
+			}
+		}
+		prepared[modelID] = preparedModel{model: model, needsPort: needsPort}
+	}
+
+	nextPort := startPort
+	for _, modelID := range modelIDs {
+		entry, ok := prepared[modelID]
+		if !ok {
+			continue
+		}
+		model := entry.model
+
+		// setParamsByID keys are handled separately because ordinary mapping
+		// keys are intentionally not macro targets.
+		macros := mergeModelMacros(modelID, declarations.Macros, declarations.Models[modelID].Macros)
+		if err := substituteSetParamsByIDKeys(model, macros); err != nil {
+			return nil, configMacroConfig{}, fmt.Errorf("model %s filters.setParamsByID: %w", modelID, err)
+		}
+
+		if entry.needsPort {
 			// PORT is available only to models whose command requests an
-			// automatically allocated port. Once allocated, apply it throughout
-			// that model just like a typed macro value.
-			if !cmdHasPort && proxyHasPort {
-				return nil, configMacroConfig{}, fmt.Errorf("model %s: proxy uses ${PORT} but cmd does not - ${PORT} is only available when used in cmd", modelID)
+			// automatically allocated port. Skip any port a fixed local proxy
+			// has reserved, then apply the value throughout that model just
+			// like a typed macro value.
+			for {
+				if _, reserved := reservedPorts[nextPort]; !reserved {
+					break
+				}
+				nextPort++
 			}
 
 			portMacro := MacroList{{Name: "PORT", Value: nextPort}}
-			resolved, err = substituteMacroList(model, portMacro)
+			resolved, err := substituteMacroList(model, portMacro)
 			if err != nil {
 				return nil, configMacroConfig{}, fmt.Errorf("model %s: %w", modelID, err)
 			}
@@ -259,6 +296,45 @@ func rawStartPort(raw map[string]any) (int, error) {
 		return 0, fmt.Errorf("startPort must be greater than 1")
 	}
 	return value.StartPort, nil
+}
+
+// localProxyPort returns the explicitly configured port of a proxy URL when
+// the proxy points at this machine. Remote hosts and proxies without an
+// explicit port reserve nothing. Invalid ports are ignored; the proxy will
+// fail later just as it does without reservation.
+func localProxyPort(rawProxy string) (int, bool) {
+	if rawProxy == "" {
+		return 0, false
+	}
+	parsed, err := url.Parse(rawProxy)
+	if err != nil {
+		return 0, false
+	}
+	portString := parsed.Port()
+	if portString == "" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil || port < 1 {
+		return 0, false
+	}
+	if !isLocalProxyHost(parsed.Hostname()) {
+		return 0, false
+	}
+	return port, true
+}
+
+// isLocalProxyHost reports whether host names this machine, either as
+// localhost, a loopback address, or an unspecified address.
+func isLocalProxyHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsUnspecified()
 }
 
 func mergeModelMacros(modelID string, global, model MacroList) MacroList {
