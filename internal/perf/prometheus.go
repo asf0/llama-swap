@@ -13,6 +13,9 @@ const mbToBytes = int64(1024 * 1024)
 // with the most recent system and GPU stats.
 func (m *Monitor) MetricsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A scrape is a consumer: keep GPU sampling running while it happens.
+		m.Touch()
+
 		sysStats, gpuStats := m.Current()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,10 +205,11 @@ func TestStart_SubscriberReceivesStats(t *testing.T) {
 // or stays open until ctx is done. Its wait method records every restart wait
 // and returns at once, unless blockWait is set.
 type fakeGpuCollector struct {
-	mu    sync.Mutex
-	calls int
-	steps []fakeGpuStep
-	waits []time.Duration
+	mu      sync.Mutex
+	calls   int
+	steps   []fakeGpuStep
+	waits   []time.Duration
+	stopped atomic.Int32
 
 	// blockWait makes the first restart wait signal waiting, block until ctx
 	// is done, then signal waitDone.
@@ -243,27 +245,24 @@ func (f *fakeGpuCollector) start(ctx context.Context, _ time.Duration, _ *logmon
 			// exits before it reports anything
 			return
 		}
-		// ID carries the call number so a test can tell collectors apart.
-		// One that stays open keeps reporting, as nvidia-smi does every
-		// interval: the monitor drops a sample when a listener has not read
-		// the previous one, so no single sample is guaranteed to arrive.
-		for {
-			select {
-			case ch <- []GpuStat{{ID: call}}:
-			case <-ctx.Done():
-				return
-			}
-			if !step.stayOpen {
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Millisecond):
-			}
+		// ID carries the call number so a test can tell collectors apart
+		select {
+		case ch <- []GpuStat{{ID: call}}:
+		case <-ctx.Done():
+			return
+		}
+		if step.stayOpen {
+			<-ctx.Done()
+			f.stopped.Add(1)
 		}
 	}()
 	return ch, nil
+}
+
+// stopCount reports how many collectors were cancelled by their context, i.e.
+// how many times sampling was shut down.
+func (f *fakeGpuCollector) stopCount() int {
+	return int(f.stopped.Load())
 }
 
 func (f *fakeGpuCollector) callCount() int {
@@ -307,13 +306,8 @@ func newGpuTestMonitor(t *testing.T, f *fakeGpuCollector) (*Monitor, chan []GpuS
 	m.gpuStats = f.start
 	m.gpuWait = f.wait
 
-	gpuCh := make(chan []GpuStat, len(f.steps)+1)
-	m.gpuListeners[gpuCh] = struct{}{}
-	t.Cleanup(func() {
-		m.mutex.Lock()
-		defer m.mutex.Unlock()
-		delete(m.gpuListeners, gpuCh)
-	})
+	_, gpuCh, unsub := m.Subscribe()
+	t.Cleanup(unsub)
 	return m, gpuCh
 }
 
@@ -332,6 +326,74 @@ func waitGpuStat(t *testing.T, gpuCh chan []GpuStat, wantID int) {
 	}
 }
 
+// waitGpuCalls waits until the fake collector has been started at least n
+// times. Samples are dropped when the listener buffer is full, so a test that
+// only cares about the restart schedule asserts on the call count instead of
+// waiting for a particular sample.
+func waitGpuCalls(t *testing.T, f *fakeGpuCollector, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool { return f.callCount() >= n },
+		2*time.Second, time.Millisecond, "timed out waiting for %d collector starts", n)
+}
+
+// TestStart_NoGpuSamplingWithoutConsumers guards the cost of GPU sampling:
+// amd-smi, rocm-smi and nvidia-smi must not run when nothing asked for stats.
+func TestStart_NoGpuSamplingWithoutConsumers(t *testing.T) {
+	f := &fakeGpuCollector{}
+	m, err := New(config.PerformanceConfig{Every: 100 * time.Millisecond}, newTestLogger())
+	require.NoError(t, err)
+	m.gpuStats = f.start
+	m.gpuWait = f.wait
+
+	m.Start()
+	defer m.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, 0, f.callCount(), "GPU collector started without a consumer")
+}
+
+func TestStart_GpuSamplingRestartsOnDemandAfterIdle(t *testing.T) {
+	f := &fakeGpuCollector{steps: []fakeGpuStep{{stayOpen: true}}}
+	m, gpuCh := newGpuTestMonitor(t, f)
+	m.gpuIdle = 50 * time.Millisecond
+
+	m.Start()
+	defer m.Stop()
+
+	waitGpuStat(t, gpuCh, 1)
+
+	require.Eventually(t, func() bool { return f.stopCount() == 1 },
+		2*time.Second, 5*time.Millisecond, "GPU collector was not paused after the idle timeout")
+
+	// idle: no new collectors even though every is much shorter
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, 1, f.callCount(), "GPU collector restarted while idle")
+
+	// a new consumer starts sampling again
+	m.Touch()
+	waitGpuCalls(t, f, 2)
+}
+
+func TestStart_TouchKeepsGpuSamplingRunning(t *testing.T) {
+	f := &fakeGpuCollector{steps: []fakeGpuStep{{stayOpen: true}}}
+	m, gpuCh := newGpuTestMonitor(t, f)
+	m.gpuIdle = 100 * time.Millisecond
+
+	m.Start()
+	defer m.Stop()
+
+	waitGpuStat(t, gpuCh, 1)
+
+	// keep asking for stats for longer than the idle timeout
+	for i := 0; i < 4; i++ {
+		time.Sleep(40 * time.Millisecond)
+		m.Touch()
+	}
+
+	assert.Equal(t, 1, f.callCount(), "collector restarted even though it was in demand")
+	assert.Equal(t, 0, f.stopCount(), "collector stopped even though it was in demand")
+}
+
 func TestStart_RestartsGpuCollectorAfterItStops(t *testing.T) {
 	// the first collector delivers one sample and exits, like nvidia-smi dying
 	f := &fakeGpuCollector{steps: []fakeGpuStep{{stayOpen: false}}}
@@ -341,7 +403,7 @@ func TestStart_RestartsGpuCollectorAfterItStops(t *testing.T) {
 	defer m.Stop()
 
 	waitGpuStat(t, gpuCh, 1)
-	waitGpuStat(t, gpuCh, 2)
+	waitGpuCalls(t, f, 2)
 	assert.Equal(t, 2, f.callCount())
 }
 
@@ -357,7 +419,7 @@ func TestStart_RetriesWhenGpuCollectorRestartFails(t *testing.T) {
 	defer m.Stop()
 
 	waitGpuStat(t, gpuCh, 1)
-	waitGpuStat(t, gpuCh, 4)
+	waitGpuCalls(t, f, 4)
 	assert.Equal(t, 4, f.callCount())
 }
 
@@ -402,7 +464,7 @@ func TestStart_GpuRestartWaitDoublesUpToMax(t *testing.T) {
 	defer m.Stop()
 
 	waitGpuStat(t, gpuCh, 1)
-	waitGpuStat(t, gpuCh, 6)
+	waitGpuCalls(t, f, 6)
 	assert.Equal(t, []time.Duration{
 		5 * time.Second,
 		10 * time.Second,
@@ -425,11 +487,9 @@ func TestStart_GpuRestartWaitResetsAfterStats(t *testing.T) {
 	m.Start()
 	defer m.Stop()
 
-	// Collector 4's single sample can be dropped if collector 1's is still
-	// unread, so wait only for collector 6, which keeps reporting. The wait
-	// resets because the monitor received collector 4's stats, whether or
-	// not this listener saw them.
-	waitGpuStat(t, gpuCh, 6)
+	waitGpuStat(t, gpuCh, 1)
+	waitGpuCalls(t, f, 4)
+	waitGpuCalls(t, f, 6)
 	assert.Equal(t, []time.Duration{
 		5 * time.Second,
 		10 * time.Second,
