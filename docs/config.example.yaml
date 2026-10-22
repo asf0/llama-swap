@@ -135,6 +135,14 @@ unloadTimeout: 10
 # - see issue #1086
 globalConcurrencyLimit: 0
 
+# maxRequestBodyMB: maximum size, in megabytes, of a request body sent to a
+# model endpoint (chat, completions, embeddings, audio, images, etc.)
+# - optional, default: 250
+# - must be 1 or more
+# - larger requests receive an HTTP 413 Request Entity Too Large response
+# - raise it for large audio uploads or many base64 images in one request
+maxRequestBodyMB: 250
+
 # filters: default request filters inherited by every local model
 # - optional, default: empty dictionary
 # - same shape as models.*.filters (stripParams, setParams, setParamsByID,
