@@ -421,6 +421,9 @@ func (s *Server) handleAPIPerformance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Someone is looking at the stats, so GPU sampling should be running.
+	s.perf.Touch()
+
 	sysStats, gpuStats := s.perf.Current()
 
 	if afterStr := r.URL.Query().Get("after"); afterStr != "" {
