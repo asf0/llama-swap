@@ -45,12 +45,17 @@ export function modelServerPath(modelId: string): string {
 }
 
 /**
- * Where the open-model button links. A model configured with its own UI uses
- * that URL directly, since the passthrough path cannot rewrite root-absolute
- * asset URLs; everything else falls back to the model's server path.
+ * Where the open-model button links, or null when there is nothing to open.
+ * A model configured with its own UI uses that URL directly, since the
+ * passthrough path cannot rewrite root-absolute asset URLs. Otherwise the
+ * model's server path is used only when the backend reported a UI there —
+ * API-only servers such as vLLM have nothing at their root, so they get no
+ * button instead of a dead link.
  */
-export function modelOpenPath(model: Model): string {
-  return model.uiUrl || modelServerPath(model.id);
+export function modelOpenPath(model: Model): string | null {
+  if (model.uiUrl) return model.uiUrl;
+  if (model.serverUI) return modelServerPath(model.id);
+  return null;
 }
 
 export function matchesCapabilities(model: Model, required: string[], matchAny = false): boolean {

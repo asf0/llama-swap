@@ -51,6 +51,9 @@ export interface Model {
   spillover?: number;
   // URL of the backend's own UI, from the v1/models llamaswap metadata
   uiUrl?: string;
+  // the backend ships its own UI reachable through the passthrough path
+  // (llama-server, ComfyUI); from the v1/models llamaswap metadata
+  serverUI?: boolean;
 }
 
 export interface Profile {

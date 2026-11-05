@@ -52,13 +52,22 @@ describe("modelOpenPath", () => {
     expect(modelOpenPath(model)).toBe("/backend/ui/");
   });
 
-  it("falls back to the model server path", () => {
-    const model = makeModel({ id: "org/model name" });
+  it("uses the model server path when the backend ships a UI", () => {
+    const model = makeModel({ id: "org/model name", serverUI: true });
     expect(modelOpenPath(model)).toBe(modelServerPath("org/model name"));
   });
 
-  it("falls back to the reserved endpoint path", () => {
-    expect(modelOpenPath(makeModel({ id: "comfyui_auto" }))).toBe("/comfyui/");
+  it("uses the reserved endpoint path for a UI server without uiUrl", () => {
+    expect(modelOpenPath(makeModel({ id: "comfyui_auto", serverUI: true }))).toBe("/comfyui/");
+  });
+
+  it("returns null when the backend has no UI", () => {
+    expect(modelOpenPath(makeModel({ id: "org/vllm-model" }))).toBeNull();
+  });
+
+  it("prefers the configured UI URL over the server path", () => {
+    const model = makeModel({ id: "llama", uiUrl: "/backend/ui/", serverUI: true });
+    expect(modelOpenPath(model)).toBe("/backend/ui/");
   });
 });
 

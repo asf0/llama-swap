@@ -4,7 +4,7 @@ summary: Control which /upstream model paths are ignored instead of triggering a
 category: guides
 tags: [upstream, proxy, api]
 config_keys: [upstream, models.*.uiUrl]
-updated: 2026-08-28
+updated: 2026-11-05
 ---
 
 # Upstream API passthrough
@@ -34,6 +34,11 @@ models:
 
 `uiUrl` must be an absolute `http://` or `https://` URL, or a root-relative
 path starting with `/`. Other values, including `javascript:` URLs and
-protocol-relative `//host` links, are rejected at startup. Leave it unset to
-keep linking to the passthrough path.
+protocol-relative `//host` links, are rejected at startup.
+
+The external-link button only appears when there is something to open: a
+configured `uiUrl`, or a backend known to serve its own UI at its root
+(llama-server, ComfyUI). API-only servers such as vLLM have nothing at their
+root, so they get no button — point `uiUrl` at a frontend like Open WebUI if
+you want one.
 

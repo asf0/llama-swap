@@ -291,6 +291,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		if upstream != hint.Unknown {
 			internalMetadata["upstream"] = string(upstream)
 		}
+		if upstream.HasWebUI() || id == config.ComfyUIModelID || id == config.AudioCppModelID {
+			internalMetadata["serverUI"] = true
+		}
 		data = append(data, newRecord(id, mc.Name, mc.Description, mc.Metadata, caps, status, internalMetadata, mc.Scanned, contextSource))
 
 		if s.cfg.IncludeAliasesInList {
@@ -305,6 +308,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 					}
 					if mc.UiURL != "" {
 						aliasMetadata["uiUrl"] = mc.UiURL
+					}
+					if upstream.HasWebUI() || id == config.ComfyUIModelID || id == config.AudioCppModelID {
+						aliasMetadata["serverUI"] = true
 					}
 					data = append(data, newRecord(
 						alias,

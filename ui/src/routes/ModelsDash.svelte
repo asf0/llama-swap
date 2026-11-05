@@ -142,16 +142,18 @@
       <Tag class="px-1.5 text-[0.625rem] uppercase">unlisted</Tag>
     {/if}
     {#if !model.peerID}
-      <a
-        href={modelOpenPath(model)}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="text-muted-foreground hover:text-foreground"
-        title="Open model UI"
-        aria-label="Open model UI"
-      >
-        <ExternalLink class="size-4" />
-      </a>
+      {#if modelOpenPath(model)}
+        <a
+          href={modelOpenPath(model)}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-muted-foreground hover:text-foreground"
+          title="Open model UI"
+          aria-label="Open model UI"
+        >
+          <ExternalLink class="size-4" />
+        </a>
+      {/if}
       <ModelLoadButton {model} />
     {/if}
     {#if percent !== undefined}

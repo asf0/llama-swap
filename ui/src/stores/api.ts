@@ -274,6 +274,7 @@ interface ModelListRecord {
       targets?: string[];
       spillover?: number;
       uiUrl?: string;
+      serverUI?: boolean;
     };
   };
 }
@@ -325,6 +326,7 @@ async function loadPlaygroundModels(request: number): Promise<Model[]> {
           targets: metadata?.targets ?? [],
           spillover: metadata?.spillover,
           uiUrl: metadata?.uiUrl,
+          serverUI: metadata?.serverUI === true,
         };
       });
     newModels.sort((a, b) => {

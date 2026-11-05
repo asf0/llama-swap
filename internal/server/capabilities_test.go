@@ -555,3 +555,68 @@ func TestAPI_ListModelsUpstreamHiddenForDisableAuto(t *testing.T) {
 
 	assert.Empty(t, recordUpstream(t, listModel(t, s)))
 }
+
+// serverUIFlag reads meta.llamaswap.serverUI from a /v1/models record. The
+// second return value is false when the flag is absent.
+func serverUIFlag(t *testing.T, rec modelRecord) (bool, bool) {
+	t.Helper()
+	ls, ok := rec.Meta["llamaswap"].(map[string]any)
+	require.True(t, ok, "%s has no meta.llamaswap", rec.ID)
+	flag, ok := ls["serverUI"].(bool)
+	return flag, ok
+}
+
+func TestAPI_ListModelsServerUIFollowsDetectedUpstream(t *testing.T) {
+	upstream := newCapUpstream(t)
+	mc := config.ModelConfig{
+		Cmd:     "llama-server -m vision.gguf",
+		Proxy:   upstream.URL,
+		Aliases: []string{"m-alias"},
+	}
+	s := capServer(t, "m", mc)
+	s.cfg.IncludeAliasesInList = true
+
+	// Before detection the upstream family is unknown, so nothing promises a
+	// UI at the model's root.
+	for _, rec := range listModels(t, s) {
+		_, ok := serverUIFlag(t, rec)
+		assert.False(t, ok, "%s has serverUI before detection", rec.ID)
+	}
+
+	detectAndDeliver(t, s, "m", mc)
+	requireCached(t, s, "m", mc)
+
+	// llama-server ships a web UI, so the model and its aliases get the flag.
+	for _, rec := range listModels(t, s) {
+		flag, ok := serverUIFlag(t, rec)
+		assert.True(t, ok, "%s missing serverUI after detection", rec.ID)
+		assert.True(t, flag, "%s serverUI = false after detection", rec.ID)
+	}
+}
+
+func TestAPI_ListModelsServerUIAbsentForAPIOnlyServers(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"id":"m","object":"model","owned_by":"vllm","max_model_len":4096}]}`))
+	}))
+	t.Cleanup(vllm.Close)
+
+	mc := config.ModelConfig{Cmd: "vllm serve m", Proxy: vllm.URL}
+	s := capServer(t, "m", mc)
+
+	detectAndDeliver(t, s, "m", mc)
+	requireCached(t, s, "m", mc)
+
+	// vLLM serves an API only: no UI at its root, so no open-model button.
+	_, ok := serverUIFlag(t, listModel(t, s))
+	assert.False(t, ok, "vllm model should not carry serverUI")
+}
+
+func TestAPI_ListModelsServerUIForReservedEndpoints(t *testing.T) {
+	for _, id := range []string{config.ComfyUIModelID, config.AudioCppModelID} {
+		s := capServer(t, id, config.ModelConfig{Cmd: "server --port ${PORT}"})
+		flag, ok := serverUIFlag(t, listModel(t, s))
+		assert.True(t, ok, "%s missing serverUI", id)
+		assert.True(t, flag, "%s serverUI = false", id)
+	}
+}

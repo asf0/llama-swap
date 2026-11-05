@@ -42,6 +42,14 @@ func (u Upstream) Known() bool {
 	return false
 }
 
+// HasWebUI reports whether the server family serves its own web UI at its
+// root, so the dashboard's open-model button can point at the passthrough
+// path. API-only servers such as vLLM have nothing to open; a model can still
+// link one with models.*.uiUrl.
+func (u Upstream) HasWebUI() bool {
+	return u == LlamaServer
+}
+
 // hostUpstreams maps a peer's proxy host to the provider behind it. Matching
 // is on the exact host or any subdomain of it.
 var hostUpstreams = []struct {
