@@ -22,7 +22,7 @@ func CreateMetricsMiddleware(mm *metricsMonitor, cfg config.Config) chain.Middle
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			websocket := r.Method == http.MethodGet && swaputil.IsWebSocketUpgrade(r)
-			if mm == nil || (r.Method != http.MethodPost && !websocket) {
+			if mm == nil || mm.disabled || (r.Method != http.MethodPost && !websocket) {
 				next.ServeHTTP(w, r)
 				return
 			}

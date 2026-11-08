@@ -83,21 +83,19 @@
             </div>
           </div>
           <div class="flex shrink-0 items-center gap-2">
-            {#if !model.peerID}
-              {#if modelOpenPath(model)}
-                <a
-                  href={modelOpenPath(model)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="text-muted-foreground hover:text-foreground"
-                  title="Open model UI"
-                  aria-label="Open model UI"
-                >
-                  <ExternalLink class="size-4" />
-                </a>
-              {/if}
-              <ModelLoadButton {model} size="sm" />
+            {#if modelOpenPath(model)}
+              <a
+                href={modelOpenPath(model)}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-muted-foreground hover:text-foreground"
+                title="Open model UI"
+                aria-label="Open model UI"
+              >
+                <ExternalLink class="size-4" />
+              </a>
             {/if}
+            <ModelLoadButton {model} size="sm" />
           </div>
         </div>
         {#if model.description}

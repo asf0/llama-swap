@@ -50,6 +50,7 @@ type metricsMonitor struct {
 	store           store.Store
 	maxMetrics      int
 	logger          *logmon.Monitor
+	disabled        bool
 	enableCaptures  bool
 	maxCaptureBytes int64
 
@@ -67,7 +68,7 @@ type metricsMonitor struct {
 // by the next capture.
 const capturePruneTimeout = 5 * time.Minute
 
-func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int, st store.Store) *metricsMonitor {
+func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int, st store.Store, disableActivity bool) *metricsMonitor {
 	if maxMetrics <= 0 {
 		maxMetrics = 1000
 	}
@@ -75,9 +76,10 @@ func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB i
 		logger:         logger,
 		store:          st,
 		maxMetrics:     maxMetrics,
-		enableCaptures: captureBufferMB > 0,
+		disabled:       disableActivity,
+		enableCaptures: !disableActivity && captureBufferMB > 0,
 	}
-	if captureBufferMB > 0 {
+	if mm.enableCaptures {
 		mm.maxCaptureBytes = int64(captureBufferMB) * 1024 * 1024
 		mm.startCapturePruner()
 		// The store outlives a config reload, so apply a lowered
@@ -130,6 +132,9 @@ func (mp *metricsMonitor) pruneCaptures(ctx context.Context) {
 // handler returns, and an aborted request (canceled context) must still be
 // recorded — that is exactly when the error entry matters.
 func (mp *metricsMonitor) queueMetrics(metric ActivityLogEntry) (ActivityLogEntry, bool) {
+	if mp == nil || mp.disabled {
+		return ActivityLogEntry{}, false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -283,6 +288,9 @@ func (mp *metricsMonitor) newEntry(modelID string, task hint.Task, r *http.Reque
 // duration is the whole session, and its tokens and metadata are the
 // session's tallies. No capture is kept: the traffic is mostly audio.
 func (mp *metricsMonitor) recordRealtime(modelID string, task hint.Task, r *http.Request, recorder *responseBodyCopier) {
+	if mp == nil || mp.disabled {
+		return
+	}
 	tm, _ := mp.newEntry(modelID, task, r, recorder)
 	recorder.realtime.fill(&tm)
 	stored, ok := mp.queueMetrics(tm)
@@ -293,6 +301,9 @@ func (mp *metricsMonitor) recordRealtime(modelID string, task hint.Task, r *http
 }
 
 func (mp *metricsMonitor) record(modelID string, task hint.Task, r *http.Request, recorder *responseBodyCopier, cf captureFields, reqBody []byte, reqHeaders map[string]string) {
+	if mp == nil || mp.disabled {
+		return
+	}
 	tm, upstream := mp.newEntry(modelID, task, r, recorder)
 
 	queueAndEmit := func() {

@@ -12,6 +12,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/hint"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/store/sqlite"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,6 +72,30 @@ func TestServer_ActivitySourceForwardedHeaders(t *testing.T) {
 				t.Fatalf("activitySource() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestServer_MetricsMiddleware_Disabled(t *testing.T) {
+	st, err := sqlite.New("", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	mm := newMetricsMonitor(logmon.NewWriter(io.Discard), 10, 1, st, true)
+	t.Cleanup(func() { _ = mm.Close() })
+
+	cfg := config.Config{Models: map[string]config.ModelConfig{"m": {}}}
+	body := `{"usage":{"prompt_tokens":56,"completion_tokens":8}}`
+	handler := chain.New(CreateMetricsMiddleware(mm, cfg)).ThenFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, body)
+	})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, chatRequest("m"))
+
+	if w.Code != http.StatusOK || w.Body.String() != body {
+		t.Fatalf("response = %d %q, want 200 %q", w.Code, w.Body.String(), body)
+	}
+	if entries := metricsEntries(t, mm); len(entries) != 0 {
+		t.Fatalf("recorded %d activity entries with activity disabled", len(entries))
 	}
 }
 

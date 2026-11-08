@@ -106,9 +106,7 @@
   {@const percent = loadingPercent(model)}
   {@const message = loadingMessage(model)}
   <div class="hover:bg-muted/50 relative flex items-center gap-3 px-3 py-2.5 sm:px-4">
-    {#if !model.peerID}
-      <span class={`size-2.5 shrink-0 rounded-full ${statusDotColor(model)}`}></span>
-    {/if}
+    <span class={`size-2.5 shrink-0 rounded-full ${statusDotColor(model)}`}></span>
     <a
       href="/models/{encodeURIComponent(model.id)}"
       use:link
@@ -141,21 +139,19 @@
     {#if model.unlisted}
       <Tag class="px-1.5 text-[0.625rem] uppercase">unlisted</Tag>
     {/if}
-    {#if !model.peerID}
-      {#if modelOpenPath(model)}
-        <a
-          href={modelOpenPath(model)}
-          target="_blank"
-          rel="noopener noreferrer"
-          class="text-muted-foreground hover:text-foreground"
-          title="Open model UI"
-          aria-label="Open model UI"
-        >
-          <ExternalLink class="size-4" />
-        </a>
-      {/if}
-      <ModelLoadButton {model} />
+    {#if modelOpenPath(model)}
+      <a
+        href={modelOpenPath(model)}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="text-muted-foreground hover:text-foreground"
+        title="Open model UI"
+        aria-label="Open model UI"
+      >
+        <ExternalLink class="size-4" />
+      </a>
     {/if}
+    <ModelLoadButton {model} />
     {#if percent !== undefined}
       <!-- Loading progress; the percentage next to the state carries it for screen readers. -->
       <div aria-hidden="true" class="bg-muted absolute inset-x-0 bottom-0 h-0.5">
@@ -340,7 +336,7 @@
                 <div
                   class="hover:bg-muted/50 flex items-center gap-3 px-3 py-2.5 sm:px-4 has-[>button]:py-1.5"
                 >
-                  {#if targetModel && !targetModel.peerID}
+                  {#if targetModel}
                     <span class={`size-2.5 shrink-0 rounded-full ${statusDotColor(targetModel)}`} role="img" aria-label={`Model ${targetModel.state}`}></span>
                   {/if}
                   <span class="max-w-[45%] truncate text-sm font-medium">{modelID}</span>
@@ -352,9 +348,7 @@
                         use:link
                         class="min-w-0 flex-1 truncate text-sm hover:text-foreground hover:underline"
                       >{target}</a>
-                      {#if !targetModel.peerID}
-                        <ModelLoadButton model={targetModel} />
-                      {/if}
+                      <ModelLoadButton model={targetModel} />
                     {:else}
                       <span class="min-w-0 truncate text-sm">{target}</span>
                     {/if}

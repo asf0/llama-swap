@@ -37,6 +37,10 @@ type ReqContextData struct {
 
 const MaxMultiPartSize = 32 << 20
 
+// PeerStatusHeader marks the periodic peer model-status poll so the peer's
+// access log can omit it. The header is advisory; it is not authentication.
+const PeerStatusHeader = "X-Llama-Swap-Peer-Status"
+
 var (
 	ReqContextKey        = &contextkey{"context"}
 	ErrNoModelInContext  = fmt.Errorf("no model in request context")

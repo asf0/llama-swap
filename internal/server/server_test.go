@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,7 +108,7 @@ func newTestServerWithConfig(cfg config.Config, local router.LocalRouter, peer r
 		cfg:         cfg,
 		logs:        logs,
 		inflight:    newInflightTracker(),
-		metrics:     newMetricsMonitor(proxylog, 0, 0, st),
+		metrics:     newMetricsMonitor(proxylog, 0, 0, st, cfg.Store != nil && cfg.Store.DisableActivity),
 		store:       st,
 		capcompat:   capcompat.New(st.Cache(), proxylog),
 		local:       local,
@@ -116,6 +117,7 @@ func newTestServerWithConfig(cfg config.Config, local router.LocalRouter, peer r
 		shutdownFn:  cancel,
 		pause:       NewPauseState(),
 	}
+	s.initPeerStatus()
 	s.routes()
 	return s
 }
@@ -153,7 +155,7 @@ func newTestMetricsMonitor(t *testing.T, logger *logmon.Monitor, maxMetrics int,
 			t.Errorf("store.Close: %v", err)
 		}
 	})
-	mm := newMetricsMonitor(logger, maxMetrics, captureBufferMB, st)
+	mm := newMetricsMonitor(logger, maxMetrics, captureBufferMB, st, false)
 	// Cleanups run last-in first-out, so the pruner stops before the store
 	// closes.
 	t.Cleanup(func() { mm.Close() })
@@ -568,6 +570,50 @@ func TestServer_LogStream_ModelID(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "hello from model" {
 		t.Errorf("body=%q want %q", got, "hello from model")
+	}
+}
+
+func TestServer_LogStream_PeerModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/logs/stream/model-a" {
+			t.Errorf("peer log path=%q want /logs/stream/model-a", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("peer log line\n"))
+	}))
+	defer upstream.Close()
+
+	proxyURL, _ := url.Parse(upstream.URL)
+	cfg := config.Config{
+		Peers: config.PeerDictionaryConfig{
+			"peer1": {
+				Proxy:    upstream.URL,
+				ProxyURL: proxyURL,
+				Models:   []string{"model-a"},
+			},
+		},
+	}
+	peer, err := router.NewPeer(cfg, logmon.NewWriter(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Shutdown(time.Second)
+
+	s := newTestServerWithConfig(cfg, newStubRouter(nil, ""), peer)
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/logs/stream/peer1/model-a", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := w.Body.String(); got != "peer log line\n" {
+		t.Errorf("body=%q want %q", got, "peer log line\n")
+	}
+	// The peer's Content-Type must be copied once, not added to a local one.
+	if got := w.Header().Values("Content-Type"); len(got) != 1 {
+		t.Errorf("Content-Type values=%q want exactly one", got)
 	}
 }
 

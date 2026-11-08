@@ -56,15 +56,15 @@ func (s *Server) getLogger(logMonitorID string) (*logmon.Monitor, error) {
 	return nil, fmt.Errorf("invalid logger. Use 'proxy', 'upstream', 'http' or a model's ID")
 }
 
+// peerLogStreamer is implemented by the peer router. It is optional so local
+// routers and test doubles do not need to provide peer logs.
+type peerLogStreamer interface {
+	LogStream(http.ResponseWriter, *http.Request, string) bool
+}
+
 // handleLogStream tails a log monitor: it writes the history then streams live
 // log data until the client disconnects or the server shuts down.
 func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// prevent nginx from buffering streamed logs
-	w.Header().Set("X-Accel-Buffering", "no")
-
 	logMonitorID := strings.TrimPrefix(r.PathValue("logMonitorID"), "/")
 	// Strip a query string if it leaked into the path segment.
 	if idx := strings.Index(logMonitorID, "?"); idx != -1 {
@@ -73,15 +73,34 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 
 	logger, err := s.getLogger(logMonitorID)
 	if err != nil {
+		// A peer model has no local process logger, so fetch its log from the
+		// peer that runs it.
+		if peer, ok := s.peer.(peerLogStreamer); ok && peer.LogStream(w, r, logMonitorID) {
+			return
+		}
 		swaputil.SendResponse(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	s.streamLogger(w, r, logger)
+}
+
+// streamLogger serves a resolved local log monitor. Headers are flushed before
+// the first log line so an idle model opens an empty stream instead of leaving
+// the UI's fetch pending with no response.
+func (s *Server) streamLogger(w http.ResponseWriter, r *http.Request, logger *logmon.Monitor) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// prevent nginx from buffering streamed logs
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		swaputil.SendResponse(w, r, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
+	flusher.Flush()
 
 	_, skipHistory := r.URL.Query()["no-history"]
 	if !skipHistory {
@@ -221,6 +240,12 @@ func clientIP(r *http.Request) string {
 func CreateRequestLogMiddleware(httplog *logmon.Monitor) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Periodic peer model-status polls are internal health traffic;
+			// keep them out of the peer's access log.
+			if r.Header.Get(swaputil.PeerStatusHeader) == "1" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			for _, prefix := range requestLogPathSkips {
 				if strings.HasPrefix(r.URL.Path, prefix) {
 					next.ServeHTTP(w, r)

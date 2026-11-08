@@ -3,8 +3,8 @@ title: Observability, storage and Activity
 summary: Use logs, metrics, captures and the Activity view to diagnose requests and retain useful history.
 category: guides
 tags: [operations, logs, metrics, activity, captures, stdout, http, realtime, websocket]
-config_keys: [logLevel, logToStdout, metricsMaxInMemory, captureBuffer, store.path, store.persistCaptures]
-updated: 2026-11-03
+config_keys: [logLevel, logToStdout, metricsMaxInMemory, captureBuffer, store.path, store.disableActivity, store.persistCaptures]
+updated: 2026-11-07
 ---
 
 # Observability, storage and Activity
@@ -45,6 +45,11 @@ and its own endpoint, `GET /logs/stream/<stream>`:
 - `http`: one access log line per HTTP request (client, method, path, status,
   size, duration).
 
+For a peer model, `GET /logs/stream/<peer>/<model>` is proxied to that peer's
+own `/logs/stream/<model>` endpoint, so the model's Logs tab shows the peer's
+process output. The peer's `proxy`, `upstream` and `http` streams are not merged
+into the local Logs page.
+
 `logToStdout` chooses which streams are also written to stdout. It takes a
 comma separated list such as `"proxy,http"` or `"upstream,http"`, or one of
 `"both"` (every stream) and `"none"`. The default is `"proxy"`.
@@ -61,12 +66,20 @@ What goes wrong:
 
 By default activity rows and request/response captures are kept in memory and
 lost on restart. `store.path` keeps activity rows in a SQLite file.
-`store.persistCaptures: true` also keeps captures, in a second SQLite file
-next to it named with `_captures` added to the base name:
+`metricsMaxInMemory` only bounds in-memory activity; a file-backed store keeps
+every row unless activity recording is disabled.
+
+`store.disableActivity: true` stops recording request activity and captures.
+The database stays open for the persistent model capability cache, but the
+Activity page reports no rows. Existing activity rows are not deleted; they
+are hidden while the setting is enabled. `store.persistCaptures: true` also
+keeps captures, in a second SQLite file next to it named with `_captures`
+added to the base name:
 
 ```yaml
 store:
   path: /data/metrics.db # captures go in /data/metrics_captures.db
+  disableActivity: false
   persistCaptures: true
 captureBuffer: 2048 # MB of compressed captures to keep
 ```

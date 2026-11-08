@@ -161,6 +161,18 @@ store:
 	})
 }
 
+func TestConfig_StoreDisableActivity(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "metrics.db")
+	cfg, err := LoadConfigFromReader(strings.NewReader(`
+store:
+  path: ` + storePath + `
+  disableActivity: true
+`))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Store)
+	assert.True(t, cfg.Store.DisableActivity)
+}
+
 func TestConfig_StoreCapturesPath(t *testing.T) {
 	for _, tc := range []struct {
 		path string

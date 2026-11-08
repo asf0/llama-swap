@@ -336,14 +336,32 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 				resolvedPeer == peerID && resolvedModel == modelID {
 				modelIDs[modelID] = struct{}{}
 			}
+			status := "unloaded"
+			internalMetadata := map[string]any{"type": "peer", "peerID": peerID}
+			if st, ok := s.peerStatusFor(fqn); ok {
+				switch st.State {
+				case "ready":
+					status = "loaded"
+				case "starting":
+					status = "starting"
+					if st.LoadingProgress != nil {
+						internalMetadata["loadingProgress"] = *st.LoadingProgress
+					}
+					if st.LoadingMessage != "" {
+						internalMetadata["loadingMessage"] = st.LoadingMessage
+					}
+				case "stopping":
+					status = "stopping"
+				}
+			}
 			data = append(data, newRecord(
 				fqn,
 				peerID+": "+modelID,
 				"",
 				nil,
 				config.ModelCapConfig{},
-				"unloaded",
-				map[string]any{"type": "peer", "peerID": peerID},
+				status,
+				internalMetadata,
 				config.ModelScanInfo{},
 				"",
 			))

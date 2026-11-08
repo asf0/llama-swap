@@ -36,9 +36,13 @@ export function isPending(id: string): boolean {
 }
 
 export function onToggleLoad(m: Model): void {
-  if (m.state === "stopped" && isPending(m.id)) {
+  // Peer state comes from the peer poller and starts as unknown. Treat that
+  // like stopped so the user can still ask the peer to load the model.
+  const unknownPeer = !!m.peerID && (!m.state || m.state === "unknown");
+  const stopped = m.state === "stopped" || unknownPeer;
+  if (stopped && isPending(m.id)) {
     cancelLoad(m.id);
-  } else if (m.state === "stopped") {
+  } else if (stopped) {
     void handleLoadModel(m.id);
   } else if (m.state === "ready") {
     void unloadSingleModel(m.id);

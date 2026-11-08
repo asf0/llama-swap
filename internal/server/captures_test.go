@@ -141,7 +141,7 @@ func TestServer_CapturePruneOnNewMonitor(t *testing.T) {
 		}
 	}
 
-	mm := newMetricsMonitor(logmon.NewWriter(io.Discard), 100, 1, st)
+	mm := newMetricsMonitor(logmon.NewWriter(io.Discard), 100, 1, st, false)
 	t.Cleanup(func() { mm.Close() })
 	waitForCaptureSize(t, mm, 1024*1024)
 

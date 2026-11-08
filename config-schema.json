@@ -253,6 +253,11 @@
                     "minLength": 1,
                     "description": "SQLite database file path for persistent activity logs."
                 },
+                "disableActivity": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Stop recording request activity and captures. The database is still used for the persistent model capability cache. Existing activity rows are hidden but not deleted."
+                },
                 "persistCaptures": {
                     "type": "boolean",
                     "default": false,

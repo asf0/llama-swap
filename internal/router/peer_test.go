@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -877,6 +878,209 @@ peers:
 	}
 	if err := pr.Shutdown(time.Second); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+func TestPeer_LogStream(t *testing.T) {
+	var gotPath, gotQuery, gotAuth, gotPeerKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		gotPeerKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("peer log line\n"))
+	}))
+	defer upstream.Close()
+
+	proxyURL, _ := url.Parse(upstream.URL + "/base")
+	pr, err := NewPeer(config.Config{Peers: config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    upstream.URL + "/base",
+			ProxyURL: proxyURL,
+			ApiKey:   "test-key",
+			Models:   []string{"model-a"},
+		},
+	}}, testLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pr.Shutdown(time.Second)
+
+	reset := func() {
+		gotPath, gotQuery, gotAuth, gotPeerKey = "", "", "", ""
+	}
+
+	t.Run("fully qualified model", func(t *testing.T) {
+		reset()
+		req := httptest.NewRequest(http.MethodGet, "/logs/stream/peer1/model-a?no-history", nil)
+		rec := httptest.NewRecorder()
+		if !pr.LogStream(rec, req, "peer1/model-a") {
+			t.Fatal("LogStream reported a known model as unknown")
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); got != "peer log line\n" {
+			t.Errorf("body=%q", got)
+		}
+		if gotPath != "/base/logs/stream/model-a" {
+			t.Errorf("peer path=%q want /base/logs/stream/model-a", gotPath)
+		}
+		if gotQuery != "no-history" {
+			t.Errorf("query=%q want no-history", gotQuery)
+		}
+		if gotAuth != "Bearer test-key" {
+			t.Errorf("Authorization=%q", gotAuth)
+		}
+		if gotPeerKey != "test-key" {
+			t.Errorf("x-api-key=%q", gotPeerKey)
+		}
+	})
+
+	t.Run("bare model name", func(t *testing.T) {
+		reset()
+		req := httptest.NewRequest(http.MethodGet, "/logs/stream/model-a", nil)
+		rec := httptest.NewRecorder()
+		if !pr.LogStream(rec, req, "model-a") {
+			t.Fatal("LogStream reported a known bare model as unknown")
+		}
+		if got := rec.Body.String(); got != "peer log line\n" {
+			t.Errorf("body=%q", got)
+		}
+		if gotPath != "/base/logs/stream/model-a" {
+			t.Errorf("peer path=%q", gotPath)
+		}
+		if gotQuery != "" {
+			t.Errorf("query=%q want empty", gotQuery)
+		}
+	})
+
+	t.Run("unknown model", func(t *testing.T) {
+		reset()
+		req := httptest.NewRequest(http.MethodGet, "/logs/stream/nope", nil)
+		rec := httptest.NewRecorder()
+		if pr.LogStream(rec, req, "nope") {
+			t.Fatal("LogStream claimed an unknown model")
+		}
+		if gotPath != "" {
+			t.Errorf("unexpected upstream request path=%q", gotPath)
+		}
+	})
+}
+
+func TestPeer_LoadUnload(t *testing.T) {
+	var requests []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization=%q", got)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	}))
+	defer upstream.Close()
+
+	proxyURL, _ := url.Parse(upstream.URL)
+	pr, err := NewPeer(config.Config{Peers: config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    upstream.URL,
+			ProxyURL: proxyURL,
+			ApiKey:   "test-key",
+			Models:   []string{"model-a"},
+		},
+	}}, testLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pr.Shutdown(time.Second)
+
+	rec := httptest.NewRecorder()
+	if !pr.Load(rec, httptest.NewRequest(http.MethodPost, "/api/models/load/peer1/model-a", nil), "peer1/model-a") {
+		t.Fatal("Load reported a known model as unknown")
+	}
+	if rec.Code != http.StatusOK || rec.Body.String() != "OK" {
+		t.Fatalf("load response = %d %q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	if !pr.Unload(rec, httptest.NewRequest(http.MethodPost, "/api/models/unload/peer1/model-a", nil), "peer1/model-a") {
+		t.Fatal("Unload reported a known model as unknown")
+	}
+	if rec.Code != http.StatusOK || rec.Body.String() != "OK" {
+		t.Fatalf("unload response = %d %q", rec.Code, rec.Body.String())
+	}
+
+	if want := []string{"POST /api/models/load/model-a", "POST /api/models/unload/model-a"}; !slices.Equal(requests, want) {
+		t.Errorf("requests=%q want %q", requests, want)
+	}
+	if pr.Load(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), "nope") {
+		t.Fatal("Load claimed an unknown model")
+	}
+	if pr.Unload(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil), "nope") {
+		t.Fatal("Unload claimed an unknown model")
+	}
+}
+
+func TestPeer_Statuses(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("status path=%q want /v1/models", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Errorf("x-api-key=%q", got)
+		}
+		if got := r.Header.Get(swaputil.PeerStatusHeader); got != "1" {
+			t.Errorf("%s=%q want 1", swaputil.PeerStatusHeader, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[
+			{"id":"model-a","status":{"value":"loaded"},"meta":{"llamaswap":{"loadingProgress":1,"loadingMessage":"ready"}}},
+			{"id":"model-b","status":{"value":"starting"},"meta":{"llamaswap":{"loadingProgress":0.4,"loadingMessage":"weights"}}},
+			{"id":"model-c","status":{"value":"unloaded"}}
+		]}`))
+	}))
+	defer upstream.Close()
+
+	proxyURL, _ := url.Parse(upstream.URL)
+	pr, err := NewPeer(config.Config{Peers: config.PeerDictionaryConfig{
+		"peer1": config.PeerConfig{
+			Proxy:    upstream.URL,
+			ProxyURL: proxyURL,
+			ApiKey:   "test-key",
+			Models:   []string{"model-a", "model-b", "model-c", "model-missing"},
+		},
+	}}, testLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pr.Shutdown(time.Second)
+
+	statuses := pr.Statuses(context.Background())
+	tests := []struct {
+		model   string
+		state   string
+		message string
+	}{
+		{"peer1/model-a", "ready", "ready"},
+		{"peer1/model-b", "starting", "weights"},
+		{"peer1/model-c", "stopped", ""},
+		{"peer1/model-missing", "unknown", ""},
+	}
+	for _, test := range tests {
+		got, ok := statuses[test.model]
+		if !ok {
+			t.Errorf("%s missing from statuses", test.model)
+			continue
+		}
+		if got.State != test.state || got.LoadingMessage != test.message {
+			t.Errorf("%s = %+v, want state=%q message=%q", test.model, got, test.state, test.message)
+		}
+	}
+	if got := statuses["peer1/model-b"].LoadingProgress; got == nil || *got != 0.4 {
+		t.Errorf("model-b progress=%v want 0.4", got)
 	}
 }
 

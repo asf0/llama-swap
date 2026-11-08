@@ -12,6 +12,7 @@ const ModelCapabilitiesChangedEventID = 0x09
 const ProcessLoadingEventID = 0x0A
 const InferencePausedEventID = 0x0B
 const UpstreamDetectedEventID = 0x0C
+const PeerStatusChangedEventID = 0x0D
 
 // ProcessStateChangeEvent is emitted whenever a process transitions between
 // lifecycle states. States are carried as strings so this package stays a leaf
@@ -24,6 +25,14 @@ type ProcessStateChangeEvent struct {
 
 func (e ProcessStateChangeEvent) Type() uint32 {
 	return ProcessStateChangeEventID
+}
+
+// PeerStatusChangedEvent is emitted when a peer model's cached lifecycle
+// state changes, so the SSE model feed can refresh without polling the UI.
+type PeerStatusChangedEvent struct{}
+
+func (PeerStatusChangedEvent) Type() uint32 {
+	return PeerStatusChangedEventID
 }
 
 type ReloadingState int

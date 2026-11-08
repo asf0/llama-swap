@@ -15,8 +15,12 @@
   let btnSize = $derived(size === "sm" ? "size-5 rounded-sm" : "size-7 rounded-md");
   let iconSize = $derived(size === "sm" ? "size-3.5" : "size-4");
   let busy = $derived(model.state === "starting" || model.state === "stopping");
-  // Loading is rejected while inference is paused; unloading still works.
-  let pausedLoad = $derived($inferencePaused && model.state !== "ready");
+  // Peer state starts as unknown until the first status poll; while a load is
+  // pending there is no local state transition to show, so treat it as stopped.
+  let unknownPeer = $derived(!!model.peerID && (!model.state || model.state === "unknown"));
+  let pending = $derived(!!$pendingLoads[model.id] && (model.state === "stopped" || unknownPeer));
+  // Local inference pause does not stop a peer from loading a model.
+  let pausedLoad = $derived(!model.peerID && $inferencePaused && model.state !== "ready");
 </script>
 
 <button
@@ -27,7 +31,7 @@
   disabled={busy || pausedLoad}
   onclick={() => onToggleLoad(model)}
 >
-  {#if $pendingLoads[model.id] && model.state === "stopped"}
+  {#if pending}
     <Loader2 class="{iconSize} animate-spin" />
   {:else if model.state === "ready"}
     <PowerOff class={iconSize} />

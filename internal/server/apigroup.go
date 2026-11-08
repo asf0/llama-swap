@@ -215,7 +215,22 @@ func (s *Server) modelStatus() []apiModel {
 
 	for peerID, peer := range s.cfg.Peers {
 		for _, modelID := range peer.Models {
-			models = append(models, apiModel{Id: config.PeerModelFQN(peerID, modelID), PeerID: peerID})
+			fqn := config.PeerModelFQN(peerID, modelID)
+			state := "unknown"
+			var progress *float64
+			var message string
+			if status, ok := s.peerStatusFor(fqn); ok {
+				state = status.State
+				progress = status.LoadingProgress
+				message = status.LoadingMessage
+			}
+			models = append(models, apiModel{
+				Id:              fqn,
+				PeerID:          peerID,
+				State:           state,
+				LoadingProgress: progress,
+				LoadingMessage:  message,
+			})
 		}
 	}
 
@@ -233,17 +248,22 @@ func (s *Server) handleAPIUnloadAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIUnloadModel(w http.ResponseWriter, r *http.Request) {
 	requested := strings.TrimPrefix(r.PathValue("model"), "/")
 	realName, found := s.cfg.RealModelName(requested)
-	if !found {
-		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
+	if found {
+		if !s.local.Handles(realName) {
+			swaputil.SendResponse(w, r, http.StatusNotFound, "no local server found for requested model")
+			return
+		}
+		s.local.Unload(0, realName)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
 		return
 	}
-	if !s.local.Handles(realName) {
-		swaputil.SendResponse(w, r, http.StatusNotFound, "no local server found for requested model")
+
+	if peer, ok := s.peer.(peerModelController); ok && peer.Unload(w, r, requested) {
+		go s.refreshPeerStatuses()
 		return
 	}
-	s.local.Unload(0, realName)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
 }
 
 // handleAPILoadModel loads a single named local model by dispatching a
@@ -253,6 +273,10 @@ func (s *Server) handleAPILoadModel(w http.ResponseWriter, r *http.Request) {
 	requested := strings.TrimPrefix(r.PathValue("model"), "/")
 	realName, found := s.cfg.RealModelName(requested)
 	if !found {
+		if peer, ok := s.peer.(peerModelController); ok && peer.Load(w, r, requested) {
+			go s.refreshPeerStatuses()
+			return
+		}
 		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
 		return
 	}
@@ -290,6 +314,18 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 		swaputil.SendResponse(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.metrics.disabled {
+		// Activity recording is off; report an empty page rather than
+		// exposing rows left over from before the setting was enabled.
+		q := query.WithDefaults()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.ActivityPage{
+			Data:  []ActivityLogEntry{},
+			Page:  q.Page,
+			Limit: q.Limit,
+		})
+		return
+	}
 	page, err := s.store.Activity().List(r.Context(), query)
 	if err != nil {
 		swaputil.SendResponse(w, r, http.StatusInternalServerError, "failed to get activity")
@@ -302,6 +338,11 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIActivityStats serves aggregate activity statistics and histograms.
 func (s *Server) handleAPIActivityStats(w http.ResponseWriter, r *http.Request) {
+	if s.metrics.disabled {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(store.ActivityStats{})
+		return
+	}
 	stats, err := s.store.Activity().Stats(r.Context(), store.ActivityStatsQuery{
 		Model: strings.TrimSpace(r.URL.Query().Get("model")),
 	})
@@ -747,6 +788,7 @@ func (s *Server) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
 		unsubscribe := []context.CancelFunc{
 			event.On(func(e swaputil.ProcessStateChangeEvent) { sendModels() }),
 			event.On(func(e swaputil.ProcessLoadingEvent) { sendModels() }),
+			event.On(func(e swaputil.PeerStatusChangedEvent) { sendModels() }),
 			event.On(func(e swaputil.ModelCapabilitiesChangedEvent) { sendModels() }),
 			event.On(func(e swaputil.ConfigFileChangedEvent) { sendModels() }),
 			event.On(func(e swaputil.ProfileChangedEvent) {

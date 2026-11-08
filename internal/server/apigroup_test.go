@@ -375,6 +375,41 @@ func TestServer_APIMetricsActivity_Empty(t *testing.T) {
 	}
 }
 
+func TestServer_APIMetricsActivity_DisabledHidesExistingRows(t *testing.T) {
+	cfg := config.Config{Store: &config.Store{Path: "/tmp/ignored.db", DisableActivity: true}}
+	s := newTestServerWithConfig(cfg, newStubRouter(nil, ""), newStubRouter(nil, ""))
+
+	if _, err := s.store.Activity().Insert(context.Background(), store.ActivityLogEntry{Model: "old"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/metrics/activity", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("activity status = %d", w.Code)
+	}
+	var page store.ActivityPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("unmarshal activity: %v", err)
+	}
+	if page.Total != 0 || len(page.Data) != 0 {
+		t.Errorf("activity page = %+v, want empty", page)
+	}
+
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/metrics/stats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stats status = %d", w.Code)
+	}
+	var stats store.ActivityStats
+	if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
+		t.Fatalf("unmarshal stats: %v", err)
+	}
+	if stats.TotalRequests != 0 {
+		t.Errorf("stats = %+v, want zero", stats)
+	}
+}
+
 func TestServer_APIMetricsActivity(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	s.metrics.enableCaptures = true

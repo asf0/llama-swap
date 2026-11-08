@@ -79,6 +79,13 @@ type Server struct {
 	local router.LocalRouter
 	peer  router.Router
 
+	// peerStatus mirrors the lifecycle state reported by each peer's
+	// /v1/models listing. A background poller refreshes it and emits
+	// PeerStatusChangedEvent so the UI's model feed stays live.
+	peerStatusMu sync.RWMutex
+	peerStatus   map[string]router.PeerModelStatus
+	peerPollDone chan struct{}
+
 	mux     *http.ServeMux
 	handler http.Handler
 
@@ -300,7 +307,7 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 		logs:          logs,
 		perf:          perfMon,
 		inflight:      newInflightTracker(),
-		metrics:       newMetricsMonitor(logs.ProxyLogs, cfg.MetricsMaxInMemory, cfg.CaptureBuffer, st),
+		metrics:       newMetricsMonitor(logs.ProxyLogs, cfg.MetricsMaxInMemory, cfg.CaptureBuffer, st, cfg.Store != nil && cfg.Store.DisableActivity),
 		store:         st,
 		build:         build,
 		hardware:      hardware,
@@ -332,6 +339,8 @@ func New(cfg config.Config, logs *logmon.Group, perfMon *perf.Monitor, st store.
 	s.tools = tools
 
 	s.routes()
+	s.initPeerStatus()
+	s.startPeerStatusPolling()
 	s.startPreload()
 	return s, nil
 }
@@ -670,6 +679,9 @@ func (s *Server) Shutdown(timeout time.Duration) error {
 		return nil
 	}
 	s.shutdownFn()
+	if s.peerPollDone != nil {
+		<-s.peerPollDone
+	}
 	if s.capcompatCancel != nil {
 		s.capcompatCancel()
 	}

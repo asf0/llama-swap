@@ -149,6 +149,11 @@ type HookOnStartup struct {
 type Store struct {
 	// Path is the SQLite database file for activity logs.
 	Path string `yaml:"path"`
+	// DisableActivity stops recording request activity and captures. The
+	// database is still opened for the persistent model capability cache.
+	// Existing activity rows are not deleted, but they are hidden from the
+	// Activity API while this is true.
+	DisableActivity bool `yaml:"disableActivity"`
 	// PersistCaptures keeps request/response captures in a second SQLite
 	// file next to Path; see CapturesPath. When false, captures are kept in
 	// memory. Their total size is bounded by captureBuffer either way.
