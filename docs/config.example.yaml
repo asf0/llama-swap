@@ -54,10 +54,12 @@ logToStdout: "proxy"
 # store: persistent storage for activity metrics state
 # - optional, default: in-memory sqlite database capped by metricsMaxInMemory
 # - path is a sqlite database file path
-# - file-backed sqlite keeps activity logs across restarts
-# - disableActivity: stop recording request activity and captures; the
-#   database is still used for the persistent model capability cache
-#   - optional, default: false
+# - file-backed sqlite keeps activity logs across restarts by default
+# - persistActivity: keep activity rows in the sqlite database
+#   - optional, default: true
+#   - false keeps activity in memory (bounded by metricsMaxInMemory) and
+#     loses it when the server exits; the database is still used for the
+#     persistent model capability cache
 # - persistCaptures: keep request/response captures in a second sqlite file
 #   next to path, named with _captures added to the base name, so
 #   /path/to/file.sqlite stores captures in /path/to/file_captures.sqlite
@@ -66,7 +68,7 @@ logToStdout: "proxy"
 #   - keep or move the two files together
 # store:
 #   path: /path/to/file.sqlite
-#   disableActivity: false
+#   persistActivity: true
 #   persistCaptures: true
 
 # metricsMaxInMemory: maximum number of metrics to keep in memory

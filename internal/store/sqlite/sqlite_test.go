@@ -9,6 +9,56 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/store"
 )
 
+func TestStore_InMemoryActivityKeepsCacheOnDisk(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+
+	st, err := NewWithActivity("", cachePath, "")
+	if err != nil {
+		t.Fatalf("NewWithActivity: %v", err)
+	}
+	if !st.IsInMemory() {
+		t.Fatal("activity database should be in memory")
+	}
+	if _, err := st.Activity().Insert(ctx, store.ActivityLogEntry{Model: "m"}); err != nil {
+		t.Fatalf("Insert activity: %v", err)
+	}
+	if err := st.Cache().Set(ctx, store.CacheEntry{Key: "k", Data: []byte("v")}); err != nil {
+		t.Fatalf("Set cache: %v", err)
+	}
+	page, err := st.Activity().List(ctx, store.ActivityQuery{Limit: 10, Page: 1})
+	if err != nil {
+		t.Fatalf("List activity: %v", err)
+	}
+	if page.Total != 1 {
+		t.Fatalf("activity total=%d want 1", page.Total)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	st, err = NewWithActivity("", cachePath, "")
+	if err != nil {
+		t.Fatalf("NewWithActivity reopen: %v", err)
+	}
+	defer st.Close()
+
+	page, err = st.Activity().List(ctx, store.ActivityQuery{Limit: 10, Page: 1})
+	if err != nil {
+		t.Fatalf("List activity after reopen: %v", err)
+	}
+	if page.Total != 0 {
+		t.Errorf("activity survived restart: %+v", page)
+	}
+	entry, ok, err := st.Cache().Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("Get cache: %v", err)
+	}
+	if !ok || string(entry.Data) != "v" {
+		t.Errorf("cache entry=%+v ok=%v want v", entry, ok)
+	}
+}
+
 func TestStore_InsertListAndFilterActivity(t *testing.T) {
 	ctx := context.Background()
 	st, err := New("", "")

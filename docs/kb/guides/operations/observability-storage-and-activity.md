@@ -3,7 +3,7 @@ title: Observability, storage and Activity
 summary: Use logs, metrics, captures and the Activity view to diagnose requests and retain useful history.
 category: guides
 tags: [operations, logs, metrics, activity, captures, stdout, http, realtime, websocket]
-config_keys: [logLevel, logToStdout, metricsMaxInMemory, captureBuffer, store.path, store.disableActivity, store.persistCaptures]
+config_keys: [logLevel, logToStdout, metricsMaxInMemory, captureBuffer, store.path, store.persistActivity, store.persistCaptures]
 updated: 2026-11-07
 ---
 
@@ -67,19 +67,20 @@ What goes wrong:
 By default activity rows and request/response captures are kept in memory and
 lost on restart. `store.path` keeps activity rows in a SQLite file.
 `metricsMaxInMemory` only bounds in-memory activity; a file-backed store keeps
-every row unless activity recording is disabled.
+every row unless activity persistence is disabled.
 
-`store.disableActivity: true` stops recording request activity and captures.
-The database stays open for the persistent model capability cache, but the
-Activity page reports no rows. Existing activity rows are not deleted; they
-are hidden while the setting is enabled. `store.persistCaptures: true` also
-keeps captures, in a second SQLite file next to it named with `_captures`
-added to the base name:
+`store.persistActivity: false` keeps activity in memory instead of writing it
+to the SQLite file. The Activity page still shows the current process's
+requests, bounded by `metricsMaxInMemory`, but they are lost when the server
+exits. The database stays open for the persistent model capability cache, and
+existing activity rows in the file are left untouched but no longer shown or
+extended. `store.persistCaptures: true` also keeps captures, in a second
+SQLite file next to it named with `_captures` added to the base name:
 
 ```yaml
 store:
   path: /data/metrics.db # captures go in /data/metrics_captures.db
-  disableActivity: false
+  persistActivity: false # in-memory activity, disk capability cache
   persistCaptures: true
 captureBuffer: 2048 # MB of compressed captures to keep
 ```

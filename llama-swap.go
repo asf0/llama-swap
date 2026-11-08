@@ -72,6 +72,7 @@ var logTimeFormats = map[string]string{
 // is an in-memory database. A reload reopens the store only when they change.
 type storePaths struct {
 	activity string
+	cache    string
 	captures string
 }
 
@@ -79,14 +80,21 @@ func configStorePaths(cfg config.Config) storePaths {
 	if cfg.Store == nil {
 		return storePaths{}
 	}
+	cache := strings.TrimSpace(cfg.Store.Path)
+	activity := cache
+	if !cfg.Store.ActivityPersisted() {
+		// Keep activity in memory while the capability cache stays on disk.
+		activity = ""
+	}
 	return storePaths{
-		activity: strings.TrimSpace(cfg.Store.Path),
+		activity: activity,
+		cache:    cache,
 		captures: cfg.Store.CapturesPath(),
 	}
 }
 
 func openStore(paths storePaths) (*sqlite.Store, error) {
-	return sqlite.New(paths.activity, paths.captures)
+	return sqlite.NewWithActivity(paths.activity, paths.cache, paths.captures)
 }
 
 func configureTailcatListener(cfg *config.Config, keyPath string) error {

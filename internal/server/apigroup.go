@@ -314,18 +314,6 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 		swaputil.SendResponse(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
-	if s.metrics.disabled {
-		// Activity recording is off; report an empty page rather than
-		// exposing rows left over from before the setting was enabled.
-		q := query.WithDefaults()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(store.ActivityPage{
-			Data:  []ActivityLogEntry{},
-			Page:  q.Page,
-			Limit: q.Limit,
-		})
-		return
-	}
 	page, err := s.store.Activity().List(r.Context(), query)
 	if err != nil {
 		swaputil.SendResponse(w, r, http.StatusInternalServerError, "failed to get activity")
@@ -338,11 +326,6 @@ func (s *Server) handleAPIActivity(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIActivityStats serves aggregate activity statistics and histograms.
 func (s *Server) handleAPIActivityStats(w http.ResponseWriter, r *http.Request) {
-	if s.metrics.disabled {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(store.ActivityStats{})
-		return
-	}
 	stats, err := s.store.Activity().Stats(r.Context(), store.ActivityStatsQuery{
 		Model: strings.TrimSpace(r.URL.Query().Get("model")),
 	})

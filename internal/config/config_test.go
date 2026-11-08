@@ -161,16 +161,25 @@ store:
 	})
 }
 
-func TestConfig_StoreDisableActivity(t *testing.T) {
+func TestConfig_StorePersistActivity(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "metrics.db")
+
 	cfg, err := LoadConfigFromReader(strings.NewReader(`
 store:
   path: ` + storePath + `
-  disableActivity: true
 `))
 	require.NoError(t, err)
 	require.NotNil(t, cfg.Store)
-	assert.True(t, cfg.Store.DisableActivity)
+	assert.True(t, cfg.Store.ActivityPersisted(), "activity persistence should default on")
+
+	cfg, err = LoadConfigFromReader(strings.NewReader(`
+store:
+  path: ` + storePath + `
+  persistActivity: false
+`))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Store)
+	assert.False(t, cfg.Store.ActivityPersisted())
 }
 
 func TestConfig_StoreCapturesPath(t *testing.T) {

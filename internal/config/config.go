@@ -147,17 +147,24 @@ type HookOnStartup struct {
 
 // Store configures where llama-swap persists data.
 type Store struct {
-	// Path is the SQLite database file for activity logs.
+	// Path is the SQLite database file for the model capability cache and,
+	// when PersistActivity is true, activity logs.
 	Path string `yaml:"path"`
-	// DisableActivity stops recording request activity and captures. The
-	// database is still opened for the persistent model capability cache.
-	// Existing activity rows are not deleted, but they are hidden from the
-	// Activity API while this is true.
-	DisableActivity bool `yaml:"disableActivity"`
+	// PersistActivity keeps activity rows in the SQLite database across
+	// restarts. When false, activity is kept in memory, bounded by
+	// metricsMaxInMemory, and is lost when the server exits. A nil value
+	// means true (the default).
+	PersistActivity *bool `yaml:"persistActivity"`
 	// PersistCaptures keeps request/response captures in a second SQLite
 	// file next to Path; see CapturesPath. When false, captures are kept in
 	// memory. Their total size is bounded by captureBuffer either way.
 	PersistCaptures bool `yaml:"persistCaptures"`
+}
+
+// ActivityPersisted reports whether activity rows should live in the
+// file-backed database. The default is true when the option is omitted.
+func (s Store) ActivityPersisted() bool {
+	return s.PersistActivity == nil || *s.PersistActivity
 }
 
 // CapturesPath returns the captures database file for this store, or "" when
