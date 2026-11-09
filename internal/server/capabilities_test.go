@@ -569,7 +569,9 @@ func serverUIFlag(t *testing.T, rec modelRecord) (bool, bool) {
 func TestAPI_ListModelsServerUIFollowsDetectedUpstream(t *testing.T) {
 	upstream := newCapUpstream(t)
 	mc := config.ModelConfig{
-		Cmd:     "llama-server -m vision.gguf",
+		// Deliberately not named llama-server: this exercises detection, not
+		// the command fallback.
+		Cmd:     "backend -m vision.gguf",
 		Proxy:   upstream.URL,
 		Aliases: []string{"m-alias"},
 	}
@@ -591,6 +593,46 @@ func TestAPI_ListModelsServerUIFollowsDetectedUpstream(t *testing.T) {
 		flag, ok := serverUIFlag(t, rec)
 		assert.True(t, ok, "%s missing serverUI after detection", rec.ID)
 		assert.True(t, flag, "%s serverUI = false after detection", rec.ID)
+	}
+}
+
+func TestAPI_ListModelsServerUIForLlamaServerCommand(t *testing.T) {
+	mc := config.ModelConfig{Cmd: "llama-server -m model.gguf"}
+	flag, ok := serverUIFlag(t, listModel(t, capServer(t, "m", mc)))
+	assert.True(t, ok, "llama-server command should expose serverUI before detection")
+	assert.True(t, flag)
+}
+
+func TestServer_ModelStatusServerUI(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"llama-server command", "llama-server -m model.gguf", true},
+		{"vllm command", "vllm serve model", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := capServer(t, "m", config.ModelConfig{Cmd: test.cmd})
+			var found bool
+			for _, model := range s.modelStatus() {
+				if model.Id != "m" {
+					continue
+				}
+				found = true
+				assert.Equal(t, test.want, model.ServerUI)
+
+				encoded, err := json.Marshal(model)
+				require.NoError(t, err)
+				if test.want {
+					assert.Contains(t, string(encoded), `"serverUI":true`)
+				} else {
+					assert.NotContains(t, string(encoded), `"serverUI"`)
+				}
+			}
+			assert.True(t, found, "model missing from modelStatus")
+		})
 	}
 }
 

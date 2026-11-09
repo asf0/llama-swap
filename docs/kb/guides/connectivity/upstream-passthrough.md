@@ -4,7 +4,7 @@ summary: Control which /upstream model paths are ignored instead of triggering a
 category: guides
 tags: [upstream, proxy, api]
 config_keys: [upstream, models.*.uiUrl]
-updated: 2026-11-05
+updated: 2026-11-09
 ---
 
 # Upstream API passthrough
@@ -38,7 +38,9 @@ protocol-relative `//host` links, are rejected at startup.
 
 The external-link button only appears when there is something to open: a
 configured `uiUrl`, or a backend known to serve its own UI at its root
-(llama-server, ComfyUI). API-only servers such as vLLM have nothing at their
-root, so they get no button — point `uiUrl` at a frontend like Open WebUI if
-you want one.
+(llama-server, ComfyUI). llama-server is recognized from the model command, so
+the button appears even before the first capability probe; the detected
+upstream covers wrappers and commands that do not name the binary. API-only
+servers such as vLLM have nothing at their root, so they get no button — point
+`uiUrl` at a frontend like Open WebUI if you want one.
 

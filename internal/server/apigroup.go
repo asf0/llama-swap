@@ -45,6 +45,9 @@ type apiModel struct {
 	ScanSource        string `json:"scanSource,omitempty"`
 	// UiURL is the backend's own UI, linked from the dashboard when set.
 	UiURL string `json:"uiUrl,omitempty"`
+	// ServerUI is true when the backend serves a web UI at its root, so the
+	// dashboard can link to /upstream/<id>/.
+	ServerUI bool `json:"serverUI,omitempty"`
 	// ReadySince is when the model last became ready (RFC 3339). Only set
 	// while the model is ready.
 	ReadySince string `json:"readySince,omitempty"`
@@ -168,6 +171,7 @@ func (s *Server) modelStatus() []apiModel {
 		// shutdownCtx rather than a request: modelStatus is also called from
 		// event callbacks that have no request of their own.
 		caps, contextSource := s.resolveCapabilitiesWithSource(s.shutdownCtx, id, mc)
+		upstream := s.localUpstream(s.shutdownCtx, id, mc)
 		arch, capsMap, _, ctxLen := renderCapabilities(caps)
 		var modalities *apiModalities
 		if in, ok := arch["input_modalities"].([]string); ok {
@@ -206,6 +210,7 @@ func (s *Server) modelStatus() []apiModel {
 			Spec:              mc.Scanned.Spec,
 			ScanSource:        mc.Scanned.Source,
 			UiURL:             mc.UiURL,
+			ServerUI:          hasServerUI(upstream, id, mc),
 			ReadySince:        readySince,
 			UptimeMs:          uptimeMs,
 			LoadingProgress:   loading.Progress,

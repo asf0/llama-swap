@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	"github.com/mostlygeek/llama-swap/internal/capcompat"
 	"github.com/mostlygeek/llama-swap/internal/config"
@@ -65,6 +66,18 @@ func (s *Server) localUpstream(ctx context.Context, modelID string, mc config.Mo
 		return hint.Unknown
 	}
 	return s.capcompat.Upstream(ctx, capcompat.LocalKey(modelID, mc))
+}
+
+// hasServerUI reports whether the backend serves its own web UI at its root.
+// A detected upstream is authoritative, but llama-server is also recognized
+// from the configured command so the open-model link works before the first
+// probe and when no detection result is cached. The reserved passthrough
+// endpoints always have a UI.
+func hasServerUI(upstream hint.Upstream, modelID string, mc config.ModelConfig) bool {
+	if upstream.HasWebUI() || modelID == config.ComfyUIModelID || modelID == config.AudioCppModelID {
+		return true
+	}
+	return strings.Contains(mc.Cmd, "llama-server")
 }
 
 // resolveCapabilities returns the capabilities to advertise for a local model:
